@@ -17,7 +17,7 @@ const audit = new AuditWriter(config.ROBIN_TRACE_DIR);
 events.on("event", event => audit.write(event));
 
 const desktop = config.ROBIN_MODE === "simulator" ? new SimulatedDesktopHarness() : new NativeDesktopHarness(config.ROBIN_HELPER_SOCKET, config.ROBIN_WORKSPACE_DISPLAY);
-const policy = new PolicyEngine();
+const policy = new PolicyEngine(config.allowedApps);
 const worker = config.ROBIN_MODE === "simulator" ? new SimulatedComputerWorker(desktop, events) : new ComputerWorker(config.OPENAI_API_KEY!, config.ROBIN_OPENAI_MODEL, desktop, policy, events);
 const orchestrator = new RobinOrchestrator(events, policy, desktop, worker, config.ROBIN_MODE === "production");
 if (config.ROBIN_MODE === "simulator") events.on("event", event => {
@@ -75,6 +75,7 @@ async function healthTick() {
   try { const permissions = await desktop.permissionStatus(); const ok = Object.values(permissions).every(Boolean); orchestrator.updateCheck("desktop", ok, ok ? "Capture and control ready" : `Missing: ${Object.entries(permissions).filter(([,v])=>!v).map(([k])=>k).join(", ")}`); }
   catch (error) { orchestrator.updateCheck("desktop", false, `Helper unavailable: ${String(error)}`); }
   orchestrator.updateCheck("policy", true, "Approval gate active");
+  const auditHealth = audit.health(); orchestrator.updateCheck("audit", auditHealth.ok, auditHealth.message);
   if (config.ROBIN_MODE === "simulator") { orchestrator.updateCheck("audio", true, "Recorded fixture route"); orchestrator.updateCheck("realtime", true, "Simulated session"); }
 }
 await healthTick(); const healthTimer = setInterval(() => void healthTick(), 10_000);

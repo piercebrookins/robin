@@ -13,6 +13,7 @@ const APPROVAL = new Set<RiskClass>(["external_commitment", "sensitive"]);
 
 export class PolicyEngine {
   readonly approvals = new Map<string, ApprovalRequest>();
+  constructor(private allowedApps?: ReadonlySet<string>) {}
 
   classify(action: ComputerAction, context: PolicyContext): RiskClass {
     const text = `${context.screenText ?? ""} ${action.type === "type" ? action.text : ""}`.toLowerCase();
@@ -33,6 +34,9 @@ export class PolicyEngine {
     | { decision: "allow"; risk: RiskClass }
     | { decision: "block"; risk: RiskClass; reason: string }
     | { decision: "approve"; risk: RiskClass; request: ApprovalRequest } {
+    const targetApp = action.type === "semantic" ? action.app : context.focusedWindow?.bundleId;
+    if (this.allowedApps && targetApp && targetApp !== "us.zoom.xos" && !this.allowedApps.has(targetApp)) return { decision: "block", risk: "sensitive", reason: `Application ${targetApp} is not allow-listed` };
+    if (this.allowedApps && !targetApp && !["screenshot", "move", "wait"].includes(action.type)) return { decision: "block", risk: "sensitive", reason: "The active application identity could not be verified" };
     const risk = this.classify(action, context);
     if (BLOCKED.has(risk)) return { decision: "block", risk, reason: `${risk.replaceAll("_", " ")} actions are blocked in the MVP` };
     if (APPROVAL.has(risk)) {

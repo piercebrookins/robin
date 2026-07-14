@@ -20,6 +20,7 @@ export function redact(value: unknown, key = ""): unknown {
 
 export class AuditWriter {
   private chain = Promise.resolve();
+  private failure: Error | undefined;
   constructor(private directory: string) {}
 
   write(event: RobinEvent): void {
@@ -27,8 +28,9 @@ export class AuditWriter {
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
       const day = event.timestamp.slice(0, 10);
       await appendFile(resolve(this.directory, `${day}.jsonl`), `${JSON.stringify(redact(event))}\n`, { mode: 0o600 });
-    }).catch(() => undefined);
+    }).catch(error => { this.failure = error instanceof Error ? error : new Error(String(error)); });
   }
 
   async flush(): Promise<void> { await this.chain; }
+  health(): { ok: boolean; message: string } { return this.failure ? { ok: false, message: `Trace write failed: ${this.failure.message}` } : { ok: true, message: "Redacted trace writable" }; }
 }

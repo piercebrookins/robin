@@ -46,7 +46,7 @@ export class RobinOrchestrator {
     if (this.production && this.worker) {
       this.taskAbort = new AbortController();
       const result = await this.worker.run({ id: randomUUID(), goal: "In Zoom, start screen sharing through the normal Share Screen UI. Select only the dedicated Robin workspace display or the visible work application, never the control panel or unrelated windows. Verify Zoom's green sharing indicator before finishing.", constraints: ["Do not share sensitive or unrelated content", "Use the normal Zoom UI"], successCriteria: ["Green Zoom sharing indicator is visible", "Only the intended workspace is selected"] }, this.taskAbort.signal);
-      if (result.status !== "completed") { await this.humanTakeover(result.summary); throw new Error(result.summary); }
+      if (result.status !== "completed") { if (!this.stopped && !this.takeover) await this.humanTakeover(result.summary); throw new Error(result.summary); }
     } else await this.desktop.perform([{ type: "semantic", app: "us.zoom.xos", role: "button", title: "Share Screen", action: "press" }]);
     if (this.meeting) this.meeting.sharing = true; this.setState("sharing");
   }

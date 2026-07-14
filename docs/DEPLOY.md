@@ -7,6 +7,8 @@
 - One dedicated macOS user and one dedicated, already-authorized Zoom account.
 - Fixed 1920×1080 workspace where available; no unrelated personal applications or documents.
 
+The supported and last-verified dependency baselines are machine-readable in `infra/versions.env`. GitHub CI continuously verifies macOS 14, Node 24, and Swift tools 5.10; the development host and Zoom/BlackHole versions are recorded separately in that file.
+
 ## Bootstrap
 
 Clone the public repository as the dedicated user, then run:

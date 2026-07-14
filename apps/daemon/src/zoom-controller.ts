@@ -21,6 +21,7 @@ export class ZoomLifecycleController {
       if (ambiguous === this.recoveryAfter) {
         this.events.publish({ kind: "meeting.recovery_started", severity: "warning", source: "daemon", data: { reason: "Zoom state was not recognized semantically" } });
         const result = await this.worker.run({ id: randomUUID(), goal: "Complete the ordinary Zoom join flow. Handle only normal join-audio, preview, waiting-room, and meeting dialogs. Do not enter credentials or change settings. Finish when visibly in the meeting or waiting room.", constraints: ["Normal Zoom meeting controls only", "No credentials", "No security settings"], successCriteria: ["In meeting or waiting room is visually verified"] }, signal);
+        if (signal.aborted) return;
         if (result.status !== "completed") { await this.orchestrator.humanTakeover(result.summary); return; }
       }
       await new Promise(resolve => setTimeout(resolve, this.pollMs));
