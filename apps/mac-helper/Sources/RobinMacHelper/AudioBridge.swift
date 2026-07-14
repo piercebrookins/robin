@@ -66,6 +66,6 @@ func findAudioDevice(named name: String, input: Bool) -> AudioDeviceID? {
 
 func deviceName(_ device: AudioDeviceID) -> String? {
   var address = AudioObjectPropertyAddress(mSelector: kAudioObjectPropertyName, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-  var name: CFString = "" as CFString; var size = UInt32(MemoryLayout<CFString>.size)
-  guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &name) == noErr else { return nil }; return name as String
+  var name: Unmanaged<CFString>?; var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+  guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &name) == noErr, let name else { return nil }; return name.takeUnretainedValue() as String
 }

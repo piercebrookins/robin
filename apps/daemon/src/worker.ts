@@ -18,7 +18,7 @@ export class ComputerWorker implements TaskWorker {
     while (!signal.aborted && actions < 60) {
       let response: any;
       try {
-        response = await this.client.responses.create({ model: this.model, instructions: WORKER_PROMPT, tools: [{ type: "computer", environment: "computer" }, approvalTool], input, previous_response_id: previousResponseId, reasoning: { effort: "medium" }, truncation: "auto", safety_identifier: "robin-dedicated-host" } as any, { signal });
+        response = await this.client.responses.create({ model: this.model, instructions: WORKER_PROMPT, tools: [{ type: "computer" }, approvalTool], input, previous_response_id: previousResponseId, reasoning: { effort: "medium" }, truncation: "auto", safety_identifier: "robin-dedicated-host" } as any, { signal });
       } catch (error) {
         if (signal.aborted) return { status: "cancelled", summary: "Task cancelled", actions };
         failures++; this.events.publish({ kind: "worker.request_failed", severity: "error", source: "worker", taskId: task.id, data: { failure: failures, message: String(error) } });
@@ -37,25 +37,26 @@ export class ComputerWorker implements TaskWorker {
         if (!approved) return { status: signal.aborted ? "cancelled" : "takeover", summary: "The pending external action was not approved.", actions };
       }
       for (const call of calls) {
-        const action = mapAction(call.action);
-        const focusedWindow = await this.desktop.focusedWindow();
-        const decision = this.policy.evaluate(action, { assignedGoal: task.goal, requestedByOwner: true, ...(focusedWindow ? { focusedWindow } : {}) });
-        this.events.publish({ kind: "policy.decision", severity: decision.decision === "block" ? "warning" : "info", source: "policy", taskId: task.id, data: { decision: decision.decision, risk: decision.risk, action: action.type } });
-        if (decision.decision === "block") return { status: "takeover", summary: `Blocked: ${decision.reason}`, actions };
-        if (decision.decision === "approve") {
-          this.events.publish({ kind: "approval.requested", severity: "warning", source: "policy", taskId: task.id, data: decision.request as unknown as Record<string, unknown> });
-          const approved = await waitForApproval(this.policy, decision.request.id, signal);
-          if (!approved) return { status: signal.aborted ? "cancelled" : "takeover", summary: "The pending external action was not approved.", actions };
-        }
-        const receipt = await this.desktop.perform([action], signal); actions++;
-        if (!receipt.accepted) { failures++; if (receipt.stopped || signal.aborted) return { status: "cancelled", summary: "Task stopped immediately.", actions }; }
-        else failures = 0;
-        this.events.publish({ kind: "desktop.action", severity: "info", source: "desktop", taskId: task.id, data: { action: action.type, completed: receipt.completed } });
         const pendingChecks = Array.isArray(call.pending_safety_checks) ? call.pending_safety_checks : [];
         if (pendingChecks.length) {
           const request = this.policy.createApproval("sensitive", "OpenAI computer use raised a safety check before this desktop action.", pendingChecks.map((check: any) => check.message ?? check.code ?? "Safety check").join("; "));
           this.events.publish({ kind: "approval.requested", severity: "warning", source: "policy", taskId: task.id, data: request as unknown as Record<string, unknown> });
           if (!await waitForApproval(this.policy, request.id, signal)) return { status: "takeover", summary: "The computer-use safety check was not approved.", actions };
+        }
+        const rawActions = Array.isArray(call.actions) && call.actions.length ? call.actions : call.action ? [call.action] : [{ type: "screenshot" }];
+        for (const rawAction of rawActions) {
+          const action = mapAction(rawAction); const focusedWindow = await this.desktop.focusedWindow();
+          const decision = this.policy.evaluate(action, { assignedGoal: task.goal, requestedByOwner: true, ...(focusedWindow ? { focusedWindow } : {}) });
+          this.events.publish({ kind: "policy.decision", severity: decision.decision === "block" ? "warning" : "info", source: "policy", taskId: task.id, data: { decision: decision.decision, risk: decision.risk, action: action.type } });
+          if (decision.decision === "block") return { status: "takeover", summary: `Blocked: ${decision.reason}`, actions };
+          if (decision.decision === "approve") {
+            this.events.publish({ kind: "approval.requested", severity: "warning", source: "policy", taskId: task.id, data: decision.request as unknown as Record<string, unknown> });
+            if (!await waitForApproval(this.policy, decision.request.id, signal)) return { status: signal.aborted ? "cancelled" : "takeover", summary: "The pending external action was not approved.", actions };
+          }
+          const receipt = await this.desktop.perform([action], signal); actions++;
+          if (!receipt.accepted) { failures++; if (receipt.stopped || signal.aborted) return { status: "cancelled", summary: "Task stopped immediately.", actions }; }
+          else failures = 0;
+          this.events.publish({ kind: "desktop.action", severity: "info", source: "desktop", taskId: task.id, data: { action: action.type, completed: receipt.completed } });
         }
         input.push({ type: "computer_call_output", call_id: call.call_id, output: { type: "computer_screenshot", image_url: await this.screenshotUrl() }, ...(pendingChecks.length ? { acknowledged_safety_checks: pendingChecks } : {}) });
       }

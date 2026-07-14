@@ -182,8 +182,8 @@ func createAggregate(name: String, uid: String, subdeviceName: String) throws {
 
 func deviceUID(_ device: AudioDeviceID) -> String? {
   var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceUID, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-  var value: CFString?; var size = UInt32(MemoryLayout<CFString?>.size)
-  guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr else { return nil }; return value as String?
+  var value: Unmanaged<CFString>?; var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+  guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr, let value else { return nil }; return value.takeUnretainedValue() as String
 }
 
 func findAudioDeviceByUID(_ uid: String) -> AudioDeviceID? {
