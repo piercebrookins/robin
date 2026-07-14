@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.robin.agent</string>
+  <key>ProgramArguments</key><array><string>__ROOT__/scripts/launch-with-keychain.sh</string></array>
+  <key>WorkingDirectory</key><string>__ROOT__</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>ROBIN_HOST</key><string>127.0.0.1</string><key>ROBIN_PORT</key><string>3939</string>
+    <key>ROBIN_HELPER_SOCKET</key><string>/tmp/robin-helper.sock</string>
+    <key>ROBIN_TRACE_DIR</key><string>__HOME__/Library/Application Support/Robin/traces</string>
+  </dict>
+  <key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/><key>NetworkState</key><true/></dict>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>__HOME__/Library/Logs/Robin/daemon.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/Library/Logs/Robin/daemon.error.log</string>
+  <key>ProcessType</key><string>Interactive</string>
+</dict></plist>

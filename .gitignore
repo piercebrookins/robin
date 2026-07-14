@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.DS_Store
+*.log
+traces/*.jsonl
+.robin/
+apps/mac-helper/.build/
+coverage/
+playwright-report/
+test-results/
+.playwright-cli/
+output/

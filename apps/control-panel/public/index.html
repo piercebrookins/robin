@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <title>Robin control</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="identity"><span class="mark" aria-hidden="true">R</span><div><h1>Robin</h1><p>Meeting operator</p></div></div>
+    <div class="top-actions">
+      <span id="mode-badge" class="badge">Connecting</span>
+      <button id="takeover" class="secondary">Take over</button>
+      <button id="stop" class="danger">Emergency stop</button>
+    </div>
+  </header>
+  <div id="alert" class="alert" role="alert" hidden></div>
+  <main>
+    <section class="status-strip" aria-label="System status">
+      <div><span class="dot" id="system-dot"></span><span>System</span><strong id="system-state">Checking</strong></div>
+      <div><span class="dot"></span><span>Meeting</span><strong id="meeting-state">Ready</strong></div>
+      <div><span class="dot"></span><span>Audio</span><strong id="audio-state">Checking</strong></div>
+      <div><span class="dot"></span><span>Desktop</span><strong id="desktop-state">Checking</strong></div>
+    </section>
+
+    <div class="workspace">
+      <div class="primary-flow">
+        <section class="meeting-intake" aria-labelledby="join-title">
+          <div class="section-heading"><div><h2 id="join-title">Join a meeting</h2><p>Robin opens the signed-in Zoom Workplace app on its dedicated Mac.</p></div></div>
+          <form id="join-form">
+            <label for="meeting-url">Zoom meeting link</label>
+            <div class="join-row"><input id="meeting-url" type="url" required autocomplete="off" placeholder="https://company.zoom.us/j/…"><button type="submit">Join meeting</button></div>
+            <label for="briefing">Briefing <span>optional</span></label>
+            <textarea id="briefing" rows="2" placeholder="Context Robin should know before joining"></textarea>
+          </form>
+        </section>
+
+        <section aria-labelledby="task-title">
+          <div class="section-heading"><div><h2 id="task-title">Current work</h2><p id="task-status">No task assigned</p></div><span id="task-pill" class="badge quiet">Idle</span></div>
+          <form id="task-form" class="task-form">
+            <label for="task-goal">Assign a reversible desktop task</label>
+            <div class="join-row"><input id="task-goal" required placeholder="Prepare a local draft and show the result"><button type="submit">Assign</button></div>
+          </form>
+          <div id="timeline" class="timeline" aria-live="polite"><div class="empty">Actions and verification evidence will appear here.</div></div>
+        </section>
+
+        <section aria-labelledby="transcript-title">
+          <div class="section-heading"><div><h2 id="transcript-title">Meeting transcript</h2><p>Live speech with interruption markers.</p></div></div>
+          <div id="transcript" class="transcript" aria-live="polite"><div class="empty">Transcript begins when meeting audio connects.</div></div>
+        </section>
+      </div>
+
+      <aside>
+        <section id="approval-section" class="approval" aria-labelledby="approval-title" hidden>
+          <h2 id="approval-title">Approval needed</h2><p id="approval-summary"></p><div id="approval-action" class="exact-action"></div>
+          <p class="expiry">Approval expires shortly and applies only to this exact action.</p>
+          <div class="button-row"><button id="deny" class="secondary">Deny</button><button id="approve">Approve once</button></div>
+        </section>
+        <section class="meeting-controls" aria-labelledby="controls-title">
+          <div class="section-heading"><div><h2 id="controls-title">Meeting controls</h2><p>Normal Zoom controls on Robin’s Mac.</p></div></div>
+          <div class="control-grid">
+            <button id="mute" class="secondary">Mute</button><button id="share" class="secondary">Share workspace</button>
+            <button id="stop-share" class="secondary">Stop sharing</button><button id="leave" class="secondary warning">Leave meeting</button>
+          </div>
+          <button id="resume" class="resume" hidden>Return control to Robin</button>
+        </section>
+        <section aria-labelledby="health-title">
+          <div class="section-heading"><div><h2 id="health-title">Health</h2><p>Safe-to-run checks and remediation.</p></div></div>
+          <div id="health-list" class="health-list"><div class="skeleton"></div><div class="skeleton short"></div></div>
+        </section>
+      </aside>
+    </div>
+  </main>
+</body>
+</html>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.robin.helper</string>
+  <key>ProgramArguments</key><array><string>__ROOT__/apps/mac-helper/.build/release/RobinMacHelper</string><string>--socket</string><string>/tmp/robin-helper.sock</string></array>
+  <key>WorkingDirectory</key><string>__ROOT__</string>
+  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardOutPath</key><string>__HOME__/Library/Logs/Robin/helper.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/Library/Logs/Robin/helper.error.log</string>
+  <key>ProcessType</key><string>Interactive</string>
+</dict></plist>

@@ -1,0 +1,10 @@
+{
+  "scenarios": [
+    { "name": "network_loss", "expected": "Realtime disconnects, queued audio stays bounded, reconnect uses exponential backoff" },
+    { "name": "model_timeout", "failures": 3, "expected": "human_takeover" },
+    { "name": "unexpected_zoom_dialog", "semanticAttempts": 5, "expected": "computer-use recovery then human_takeover if unresolved" },
+    { "name": "expired_login", "windowTitle": "Sign In — session expired", "expected": "human_takeover without credential entry" },
+    { "name": "audio_failure", "expected": "bridge reconnect with bounded buffer and unhealthy diagnostic" },
+    { "name": "repeated_action_failure", "failures": 3, "expected": "human_takeover" }
+  ]
+}
