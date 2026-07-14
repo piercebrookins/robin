@@ -44,7 +44,8 @@ export class RobinOrchestrator {
   async share(): Promise<void> {
     this.ensureActive();
     if (this.production && this.worker) {
-      const result = await this.worker.run({ id: randomUUID(), goal: "In Zoom, start screen sharing through the normal Share Screen UI. Select only the dedicated Robin workspace display or the visible work application, never the control panel or unrelated windows. Verify Zoom's green sharing indicator before finishing.", constraints: ["Do not share sensitive or unrelated content", "Use the normal Zoom UI"], successCriteria: ["Green Zoom sharing indicator is visible", "Only the intended workspace is selected"] }, new AbortController().signal);
+      this.taskAbort = new AbortController();
+      const result = await this.worker.run({ id: randomUUID(), goal: "In Zoom, start screen sharing through the normal Share Screen UI. Select only the dedicated Robin workspace display or the visible work application, never the control panel or unrelated windows. Verify Zoom's green sharing indicator before finishing.", constraints: ["Do not share sensitive or unrelated content", "Use the normal Zoom UI"], successCriteria: ["Green Zoom sharing indicator is visible", "Only the intended workspace is selected"] }, this.taskAbort.signal);
       if (result.status !== "completed") { await this.humanTakeover(result.summary); throw new Error(result.summary); }
     } else await this.desktop.perform([{ type: "semantic", app: "us.zoom.xos", role: "button", title: "Share Screen", action: "press" }]);
     if (this.meeting) this.meeting.sharing = true; this.setState("sharing");
@@ -54,7 +55,8 @@ export class RobinOrchestrator {
   async leave(): Promise<void> { if (this.state.state === "ready") return; this.setState("leaving"); await this.desktop.perform([{ type: "semantic", app: "us.zoom.xos", role: "button", title: "Leave", action: "press" }, { type: "semantic", app: "us.zoom.xos", role: "button", title: "Leave Meeting", action: "press" }]); this.meeting = undefined; this.task = undefined; this.setState("ready"); }
   async emergencyStop(reason = "Owner pressed emergency stop"): Promise<void> {
     this.stopped = true; this.taskAbort?.abort(); this.events.publish({ kind: "system.stop_requested", severity: "critical", source: "control", data: { reason } });
-    if (this.meeting) { await this.desktop.perform([{ type: "semantic", app: "us.zoom.xos", role: "button", title: "Mute", action: "press" }, ...(this.meeting.sharing ? [{ type: "semantic", app: "us.zoom.xos", role: "button", title: "Stop Share", action: "press" } as const] : [])]).catch(() => undefined); }
+    if (this.meeting?.sharing) await this.desktop.perform([{ type: "semantic", app: "us.zoom.xos", role: "button", title: "Stop Share", action: "press" }]).catch(() => undefined);
+    if (this.meeting && !this.meeting.muted) await this.desktop.perform([{ type: "semantic", app: "us.zoom.xos", role: "button", title: "Mute", action: "press" }]).catch(() => undefined);
     await this.desktop.emergencyStop(); this.state.state = "stopped"; if (this.meeting) { this.meeting.muted = true; this.meeting.sharing = false; this.meeting.state = "stopped"; }
     this.events.publish({ kind: "system.emergency_stop", severity: "critical", source: "control", data: { reason } });
   }

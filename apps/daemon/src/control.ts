@@ -1,5 +1,4 @@
-import { resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
 import type { RobinConfig } from "./config.js";
@@ -7,7 +6,7 @@ import type { RobinOrchestrator } from "./orchestrator.js";
 
 export async function createControlServer(config: RobinConfig, orchestrator: RobinOrchestrator) {
   const server = Fastify({ logger: false, bodyLimit: 64 * 1024, trustProxy: false });
-  const panelRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../control-panel/public");
+  const panelRoot = resolve(process.cwd(), "apps/control-panel/public");
   await server.register(fastifyStatic, { root: panelRoot, prefix: "/" });
   server.addHook("onRequest", async (request, reply) => {
     reply.header("Cache-Control", "no-store").header("X-Content-Type-Options", "nosniff").header("X-Frame-Options", "DENY").header("Referrer-Policy", "no-referrer").header("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'");
