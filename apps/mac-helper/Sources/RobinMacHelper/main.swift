@@ -10,7 +10,11 @@ import UniformTypeIdentifiers
 import Darwin
 
 @main struct RobinMacHelper {
-  static func main() async throws {
+  static func main() async {
+    do { try await run() }
+    catch { FileHandle.standardError.write(Data("RobinMacHelper: \(error)\n".utf8)); Darwin.exit(1) }
+  }
+  static func run() async throws {
     if CommandLine.arguments.dropFirst().first == "audio-bridge" { try await AudioBridge.run(arguments: Array(CommandLine.arguments.dropFirst(2))); return }
     if CommandLine.arguments.dropFirst().first == "configure-audio" { try configureAudioRoutes(); return }
     let socketPath = argument("--socket") ?? ProcessInfo.processInfo.environment["ROBIN_HELPER_SOCKET"] ?? "/tmp/robin-helper.sock"
