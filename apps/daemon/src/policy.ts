@@ -15,6 +15,13 @@ export class PolicyEngine {
   readonly approvals = new Map<string, ApprovalRequest>();
   constructor(private allowedApps?: ReadonlySet<string>) {}
 
+  canObserveWindow(window: WindowInfo): boolean {
+    if (isProtectedWindow(window)) return false;
+    if (!this.allowedApps || !window.bundleId) return true;
+    if (isSystemShell(window.bundleId)) return true;
+    return window.bundleId === "us.zoom.xos" || this.allowedApps.has(window.bundleId);
+  }
+
   classify(action: ComputerAction, context: PolicyContext): RiskClass {
     const text = `${context.screenText ?? ""} ${action.type === "type" ? action.text : ""}`.toLowerCase();
     if (/captcha|verify you are human/.test(text)) return "captcha";
@@ -34,8 +41,9 @@ export class PolicyEngine {
     | { decision: "allow"; risk: RiskClass }
     | { decision: "block"; risk: RiskClass; reason: string }
     | { decision: "approve"; risk: RiskClass; request: ApprovalRequest } {
+    if (context.focusedWindow && isProtectedWindow(context.focusedWindow)) return { decision: "block", risk: "sensitive", reason: "Protected control, credential, or security content is visible in the target window" };
     const targetApp = action.type === "semantic" ? action.app : context.focusedWindow?.bundleId;
-    if (this.allowedApps && targetApp && targetApp !== "us.zoom.xos" && !this.allowedApps.has(targetApp)) return { decision: "block", risk: "sensitive", reason: `Application ${targetApp} is not allow-listed` };
+    if (this.allowedApps && targetApp && targetApp !== "us.zoom.xos" && !isSystemShell(targetApp) && !this.allowedApps.has(targetApp)) return { decision: "block", risk: "sensitive", reason: `Application ${targetApp} is not allow-listed` };
     if (this.allowedApps && !targetApp && !["screenshot", "move", "wait"].includes(action.type)) return { decision: "block", risk: "sensitive", reason: "The active application identity could not be verified" };
     const risk = this.classify(action, context);
     if (BLOCKED.has(risk)) return { decision: "block", risk, reason: `${risk.replaceAll("_", " ")} actions are blocked in the MVP` };
@@ -45,6 +53,22 @@ export class PolicyEngine {
       return { decision: "approve", risk, request };
     }
     return { decision: "allow", risk };
+  }
+
+  evaluateIntent(intent: { risk: RiskClass; exactAction: string; targetApp?: string; sensitiveData?: string[] }):
+    | { decision: "allow"; risk: RiskClass }
+    | { decision: "block"; risk: RiskClass; reason: string }
+    | { decision: "approve"; risk: RiskClass; request: ApprovalRequest } {
+    if (this.allowedApps && intent.targetApp && intent.targetApp !== "us.zoom.xos" && !isSystemShell(intent.targetApp) && !this.allowedApps.has(intent.targetApp)) {
+      return { decision: "block", risk: "sensitive", reason: `Application ${intent.targetApp} is not allow-listed` };
+    }
+    if (BLOCKED.has(intent.risk)) return { decision: "block", risk: intent.risk, reason: `${intent.risk.replaceAll("_", " ")} actions are blocked in the MVP` };
+    if (APPROVAL.has(intent.risk)) {
+      const risk = intent.risk === "sensitive" ? "sensitive" : "external_commitment";
+      const request = this.createApproval(risk, `Robin is ready to perform a ${intent.risk.replaceAll("_", " ")} action.`, intent.exactAction, intent.sensitiveData);
+      return { decision: "approve", risk: intent.risk, request };
+    }
+    return { decision: "allow", risk: intent.risk };
   }
 
   createApproval(risk: "external_commitment" | "sensitive", summary: string, exactAction: string, sensitiveData?: string[]): ApprovalRequest {
@@ -67,6 +91,13 @@ export class PolicyEngine {
     return [...this.approvals.values()].filter(a => a.status === "pending");
   }
 }
+
+export function isProtectedWindow(window: WindowInfo): boolean {
+  const identity = `${window.bundleId ?? ""} ${window.owner} ${window.title}`.toLowerCase();
+  return /robin control|keychain access|com\.apple\.keychainaccess|com\.apple\.passwords|1password|bitwarden|lastpass|system settings|com\.apple\.systempreferences/.test(identity);
+}
+
+function isSystemShell(bundleId: string): boolean { return /^com\.apple\.(?:dock|systemuiserver|controlcenter|notificationcenterui|windowmanager)$/i.test(bundleId); }
 
 function describeAction(action: ComputerAction): string {
   if (action.type === "type") return `Type: ${action.text.slice(0, 160)}`;

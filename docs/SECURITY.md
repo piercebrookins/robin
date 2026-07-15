@@ -11,7 +11,7 @@ The dedicated Mac user, Zoom profile, display, and allow-listed applications for
 - Observation, meeting navigation, and reversible work inside the assigned local task are allowed and logged.
 - Sending, publishing, submitting, uploading, exposing sensitive data, or making another external commitment pauses at the exact action and creates a short-lived owner approval.
 - Destructive, financial, credential-changing, CAPTCHA, and security-setting actions are blocked in the MVP.
-- Approval applies to one described action only and expires after two minutes.
+- Every mutating computer batch first declares its exact intent, target app, and risk. External or sensitive intent produces an approval that applies to one action, expires after two minutes in the panel, and must be consumed by the desktop worker within 30 seconds. Observe-only intent cannot authorize a mutating action.
 
 ## Stop semantics
 
@@ -19,7 +19,9 @@ Emergency stop and human takeover synchronously abort the Responses loop, stop a
 
 ## Data handling
 
-OpenAI and control-panel secrets live in the login Keychain. The repository, command arguments, UI, screenshots, and traces never contain them. Trace files are mode `0600` in a mode `0700` directory and redact secret-shaped values, authorization fields, and Zoom meeting passwords before disk write. Screenshots are transient model inputs and are not written to traces.
+OpenAI and control-panel secrets live in the login Keychain. The repository, command arguments, UI, screenshots, and traces never contain them. Trace files are mode `0600` in a mode `0700` directory and redact secret-shaped values, authorization fields, Zoom meeting passwords, task prose, exact-action prose, transcripts, summaries, briefings, and control-source payloads before disk write. Screenshots are transient model inputs and are not written to traces.
+
+Before any screenshot is sent to GPT-5.6, the daemon checks all onscreen windows. Control-panel, credential, security-setting, and non-allow-listed application windows make the screenshot fail closed and request takeover.
 
 The control panel is loopback-only, sends no-referrer/no-store/CSP headers, and uses a bearer token kept in session storage. For remote access, use a private network or an authenticated tunnel and terminate it outside the model-controlled display.
 

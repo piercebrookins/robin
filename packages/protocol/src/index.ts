@@ -10,13 +10,13 @@ export type RiskClass =
 export type ComputerAction =
   | { type: "screenshot" }
   | { type: "open_url"; url: string }
-  | { type: "click"; x: number; y: number; button?: "left" | "right" }
-  | { type: "double_click"; x: number; y: number; button?: "left" | "right" }
-  | { type: "move"; x: number; y: number }
-  | { type: "scroll"; x: number; y: number; scrollX: number; scrollY: number }
+  | { type: "click"; x: number; y: number; button?: "left" | "right" | "wheel" | "back" | "forward"; keys?: string[] }
+  | { type: "double_click"; x: number; y: number; button?: "left" | "right" | "wheel" | "back" | "forward"; keys?: string[] }
+  | { type: "move"; x: number; y: number; keys?: string[] }
+  | { type: "scroll"; x: number; y: number; scrollX: number; scrollY: number; keys?: string[] }
   | { type: "type"; text: string }
   | { type: "keypress"; keys: string[] }
-  | { type: "drag"; path: Array<{ x: number; y: number }> }
+  | { type: "drag"; path: Array<{ x: number; y: number }>; keys?: string[] }
   | { type: "wait"; ms: number }
   | { type: "semantic"; app: string; role: string; title?: string; action: "press" | "focus" | "set_value"; value?: string };
 

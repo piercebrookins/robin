@@ -1,6 +1,6 @@
 # Robin: a Mac-hosted agentic Zoom coworker
 
-Status: implementation plan for OpenAI Build Week  
+Status: implemented production candidate; real-Zoom release acceptance remains to be recorded
 Primary target: dedicated Apple-silicon macOS host with a persistent logged-in desktop session  
 Track: Work & Productivity
 
@@ -111,19 +111,19 @@ The control panel and secrets must not appear on the shared desktop. Run the con
 
 A TypeScript/Node.js service managed by `launchd`. It owns lifecycle, OpenAI sessions, action execution, media routing, policy, logging, and health checks. A signed `RobinMacHelper` Swift executable provides native capture, input, window inspection, and permission status over a local Unix socket.
 
-Suggested internal modules:
+Implemented internal modules:
 
 ```text
-src/
-├── orchestrator/       task lifecycle and typed event bus
-├── realtime/           duplex audio and function calls
-├── worker/             GPT-5.6 Responses computer loop
-├── desktop/            screenshots, input, window metadata
-├── audio/              Core Audio streams, resampling, echo guard
-├── policy/             authorization and approval decisions
-├── control/            authenticated local API and WebSocket events
-├── storage/            task state and redacted JSONL traces
-└── observability/      health, metrics, structured errors
+apps/daemon/src/
+├── orchestrator.ts     task and meeting lifecycle
+├── realtime.ts         duplex audio and narrow function calls
+├── worker.ts           GPT-5.6 Responses computer loop
+├── desktop.ts          native and simulated desktop harnesses
+├── audio.ts            bounded native audio subprocess bridge
+├── policy.ts           allow list, blocked classes, and approvals
+├── control.ts          authenticated loopback control API
+├── audit.ts            minimized redacted JSONL traces
+└── cli.ts              production readiness diagnostics
 ```
 
 ### Desktop harness
@@ -242,44 +242,24 @@ Treat web pages, meeting chat, shared screens, documents, and all other third-pa
 
 ```text
 robin/
-├── ARCHITECTURE.md
-├── README.md
-├── LICENSE
-├── .env.example
-├── package.json
-├── pnpm-lock.yaml
-├── Brewfile
 ├── apps/
-│   ├── daemon/
-│   ├── control-panel/
-│   └── mac-helper/       Swift package / signed native helper
-├── packages/
-│   ├── protocol/
-│   ├── desktop-harness/
-│   ├── audio-bridge/
-│   └── test-fixtures/
-├── infra/
-│   ├── terraform/       optional provider provisioning
-│   ├── launchd/
-│   ├── audio-midi/
-│   └── macos/
-├── scripts/
-│   ├── bootstrap-macos.sh
-│   ├── install-zoom.sh
-│   ├── configure-desktop.sh
-│   └── doctor.sh
+│   ├── daemon/            TypeScript orchestrator
+│   ├── control-panel/     private static operator UI
+│   └── mac-helper/        signed Swift package
+├── packages/protocol/     shared action and event types
+├── infra/launchd/         persistent user-service templates
+├── scripts/               bootstrap, signing, Keychain, and diagnostics
 ├── fixtures/
-│   ├── screenshots/
-│   ├── meeting-audio/
-│   └── action-traces/
-└── docs/
-    ├── DEPLOY.md
-    ├── SECURITY.md
-    ├── DEMO.md
-    └── TROUBLESHOOTING.md
+│   ├── screenshots/       rendered fake-Zoom states
+│   ├── meeting-audio/     mono PCM16 speech recordings
+│   └── scenarios/         deterministic recovery cases
+├── tests/                 unit, recovery, simulator, and E2E tests
+├── docs/                  deployment, security, demo, and release records
+├── Brewfile
+└── package-lock.json
 ```
 
-Zoom and BlackHole are not redistributed. The installation script obtains their official packages, records installed versions and checksums, and requires the user to sign into Zoom through the protected remote session. The repository must include a local simulated desktop/meeting mode so contributors can exercise the agent without a Zoom account.
+Zoom and BlackHole are not redistributed. Homebrew obtains their official packages, while `infra/versions.env` records the verified release baseline. The user signs into Zoom through the protected console. The committed simulator lets contributors exercise the agent without a Zoom account.
 
 ## 9. Reproduction path
 
@@ -290,10 +270,8 @@ Support two paths:
 ```bash
 git clone <repository-url>
 cd robin
-corepack enable
-pnpm install
-cp .env.example .env
-pnpm dev
+npm ci
+npm run simulator
 ```
 
 This runs the control panel, recorded audio fixtures, and a browser-based fake Zoom desktop for deterministic tests.
@@ -301,20 +279,22 @@ This runs the control panel, recorded audio fixtures, and a browser-based fake Z
 ### Real VM deployment
 
 ```bash
-terraform -chdir=infra/terraform apply  # when using a supported cloud-Mac provider
 ./scripts/bootstrap-macos.sh
+./scripts/keychain-secret.sh set OPENAI_API_KEY
+./scripts/keychain-secret.sh generate ROBIN_PANEL_TOKEN
+./scripts/install-launchd.sh
 ./scripts/doctor.sh
 ```
 
 Then the operator opens the provider's protected remote console once, signs into the dedicated macOS account and Zoom, grants Screen Recording, Accessibility, Microphone, and Automation permissions, selects the persistent `Robin Microphone` and `Robin Speaker` devices, and runs the supplied verification meeting.
 
-`doctor.sh` checks the WindowServer session, ScreenCaptureKit capture, Accessibility trust, CGEvent injection, Core Audio routes, silence/noise levels, Zoom and BlackHole versions, credential presence without printing values, OpenAI connectivity, FileVault, and watchdog state.
+`doctor.sh` checks the WindowServer session, ScreenCaptureKit capture, all four helper permissions, Core Audio routes and capture levels, Zoom presence, credential presence without printing values, access to both configured OpenAI models, helper signing, launch services, and FileVault. The real acceptance checklist separately exercises actual UI input and Zoom behavior.
 
 Pin the tested Mac model/provider, macOS release, Xcode/Swift version, Node version, Zoom package version, BlackHole version, display resolution, and Audio MIDI device configuration. Keep provisioning scripts public and provide a machine-readable `Brewfile`; secrets and the signed-in Zoom profile are intentionally excluded from the image.
 
-## 10. Implementation plan
+## 10. Implemented release path
 
-### Phase 0 — infrastructure spike
+### Stage 0 — host validation
 
 - Provision one dedicated Apple-silicon Mac host with a persistent logged-in desktop.
 - Install the official Zoom client and sign in manually.
@@ -348,7 +328,7 @@ Exit criterion: two humans can converse with Robin in Zoom, interrupt it, and de
 - Build join, task, approval, live state, emergency stop, and takeover UI.
 - Add `launchd` supervision, health endpoints, metrics, and crash-safe task state.
 - Add prompt-injection handling, action-rate limits, network restrictions, and secret redaction.
-- Create macOS bootstrap/Terraform support plus local simulator mode.
+- Create macOS bootstrap, persistent launch services, and local simulator mode.
 
 Exit criterion: another developer can deploy from the README and safely recover from Zoom dialogs, network loss, or a model timeout.
 

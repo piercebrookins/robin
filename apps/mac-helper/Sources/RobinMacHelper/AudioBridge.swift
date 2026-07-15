@@ -18,7 +18,7 @@ enum AudioBridge {
     engine.connect(player, to: engine.mainMixerNode, format: transport)
     let inputFormat = engine.inputNode.inputFormat(forBus: 0)
     guard let converter = AVAudioConverter(from: inputFormat, to: transport) else { throw HelperError("cannot create capture converter") }
-    let output = FileHandle.standardOutput
+    let output = BoundedPipeWriter(output: FileHandle.standardOutput, maxBytes: Int(rate * 2))
     engine.inputNode.installTap(onBus: 0, bufferSize: 960, format: inputFormat) { buffer, _ in
       let ratio = transport.sampleRate / inputFormat.sampleRate
       guard let converted = AVAudioPCMBuffer(pcmFormat: transport, frameCapacity: AVAudioFrameCount(Double(buffer.frameLength) * ratio + 8)) else { return }
@@ -27,11 +27,12 @@ enum AudioBridge {
         if supplied { status.pointee = .noDataNow; return nil }; supplied = true; status.pointee = .haveData; return buffer
       }
       guard error == nil, converted.frameLength > 0, let samples = converted.int16ChannelData?[0] else { return }
-      output.write(Data(bytes: samples, count: Int(converted.frameLength) * MemoryLayout<Int16>.size))
+      output.enqueue(Data(bytes: samples, count: Int(converted.frameLength) * MemoryLayout<Int16>.size))
     }
+    let playbackGate = PlaybackGate(maxFrames: Int(rate * 0.75))
     signal(SIGUSR1, SIG_IGN)
-    let interruption = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
-    interruption.setEventHandler { player.stop(); player.play() }; interruption.resume()
+    let interruption = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: DispatchQueue(label: "com.robin.audio.interrupt", qos: .userInteractive))
+    interruption.setEventHandler { player.stop(); playbackGate.clear(); player.play() }; interruption.resume()
     try engine.start(); player.play()
     FileHandle.standardError.write(Data("audio bridge ready input=\(inputName) output=\(outputName) rate=\(Int(rate))\n".utf8))
 
@@ -40,10 +41,37 @@ enum AudioBridge {
       let frames = data.count / MemoryLayout<Int16>.size
       guard frames > 0, let buffer = AVAudioPCMBuffer(pcmFormat: transport, frameCapacity: AVAudioFrameCount(frames)), let target = buffer.int16ChannelData?[0] else { continue }
       data.withUnsafeBytes { raw in if let base = raw.baseAddress { memcpy(target, base, frames * MemoryLayout<Int16>.size) } }
-      buffer.frameLength = AVAudioFrameCount(frames); await player.scheduleBuffer(buffer)
+      buffer.frameLength = AVAudioFrameCount(frames); playbackGate.reserve(frames); await player.scheduleBuffer(buffer, at: nil, options: []); playbackGate.release(frames)
     }
     interruption.cancel(); engine.inputNode.removeTap(onBus: 0); player.stop(); engine.stop()
   }
+}
+
+final class BoundedPipeWriter: @unchecked Sendable {
+  private let output: FileHandle, maxBytes: Int, lock = NSLock(), queue = DispatchQueue(label: "com.robin.audio.capture")
+  private var chunks: [Data] = [], bytes = 0, draining = false
+  init(output: FileHandle, maxBytes: Int) { self.output = output; self.maxBytes = maxBytes }
+  func enqueue(_ data: Data) {
+    lock.lock(); chunks.append(data); bytes += data.count
+    while bytes > maxBytes, !chunks.isEmpty { bytes -= chunks.removeFirst().count }
+    let shouldStart = !draining; if shouldStart { draining = true }; lock.unlock()
+    if shouldStart { queue.async { self.drain() } }
+  }
+  private func drain() {
+    while true {
+      lock.lock()
+      guard !chunks.isEmpty else { draining = false; lock.unlock(); return }
+      let data = chunks.removeFirst(); bytes -= data.count; lock.unlock(); output.write(data)
+    }
+  }
+}
+
+final class PlaybackGate: @unchecked Sendable {
+  private let condition = NSCondition(), maxFrames: Int; private var queuedFrames = 0
+  init(maxFrames: Int) { self.maxFrames = maxFrames }
+  func reserve(_ frames: Int) { condition.lock(); while queuedFrames + frames > maxFrames { condition.wait() }; queuedFrames += frames; condition.unlock() }
+  func release(_ frames: Int) { condition.lock(); queuedFrames = max(0, queuedFrames - frames); condition.broadcast(); condition.unlock() }
+  func clear() { condition.lock(); queuedFrames = 0; condition.broadcast(); condition.unlock() }
 }
 
 func setDevice(_ node: AVAudioIONode, id: AudioDeviceID) throws {

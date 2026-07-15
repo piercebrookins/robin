@@ -1,5 +1,7 @@
 import { createConnection, type Socket } from "node:net";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { ActionReceipt, CapturedFrame, ComputerAction, WindowInfo } from "../../../packages/protocol/src/index.js";
 
 export interface DesktopHarness {
@@ -40,7 +42,7 @@ export class NativeDesktopHarness implements DesktopHarness {
   permissionStatus() { return this.rpc<Record<string, boolean>>("permissions"); }
   async perform(actions: ComputerAction[], signal?: AbortSignal): Promise<ActionReceipt> {
     if (this.stopped || signal?.aborted) return { accepted: false, completed: 0, stopped: true };
-    return this.rpc<ActionReceipt>("perform", { actions });
+    return this.rpc<ActionReceipt>("perform", { actions, displayId: this.displayId });
   }
   async emergencyStop() { this.stopped = true; await this.rpc("stop"); }
   async resume() { await this.rpc("resume"); this.stopped = false; }
@@ -50,10 +52,12 @@ export class SimulatedDesktopHarness implements DesktopHarness {
   private stopped = false;
   private scene = "ready";
   private actionLog: ComputerAction[] = [];
+  constructor(private screenshotDirectory = resolve("fixtures/screenshots")) {}
 
   async screenshot(): Promise<CapturedFrame> {
-    const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
-    return { mime: "image/png", width: 1280, height: 800, data: png, capturedAt: new Date().toISOString(), displayId: 1 };
+    const filename = ["joining", "waiting_room", "in_meeting", "sharing"].includes(this.scene) ? `zoom-${this.scene.replaceAll("_", "-")}.png` : "zoom-in-meeting.png";
+    try { const png = await readFile(resolve(this.screenshotDirectory, filename)); return { mime: "image/png", width: png.readUInt32BE(16), height: png.readUInt32BE(20), data: png.toString("base64"), capturedAt: new Date().toISOString(), displayId: 1 }; }
+    catch { const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="; return { mime: "image/png", width: 1, height: 1, data: png, capturedAt: new Date().toISOString(), displayId: 1 }; }
   }
   async windows(): Promise<WindowInfo[]> { return [{ id: 1, owner: "Fake Zoom", bundleId: "us.zoom.xos", title: this.scene, bounds: { x: 130, y: 90, width: 1020, height: 620 }, focused: true, onScreen: true }]; }
   async focusedWindow() { return (await this.windows())[0]; }
@@ -63,7 +67,7 @@ export class SimulatedDesktopHarness implements DesktopHarness {
     for (const action of actions) {
       if (this.stopped || signal?.aborted) return { accepted: false, completed: this.actionLog.length, stopped: true };
       this.actionLog.push(action);
-      if (action.type === "semantic" && action.title) this.scene = action.title.toLowerCase().replaceAll(" ", "_");
+      if (action.type === "semantic" && action.title) { if (/stop share/i.test(action.title)) this.scene = "in_meeting"; else if (/share screen/i.test(action.title)) this.scene = "sharing"; else if (/leave/i.test(action.title)) this.scene = "ready"; else this.scene = action.title.toLowerCase().replaceAll(" ", "_"); }
       if (action.type === "open_url") this.scene = "joining";
       if (action.type === "wait") await new Promise(resolve => setTimeout(resolve, Math.min(action.ms, 20)));
     }

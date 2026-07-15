@@ -14,7 +14,9 @@ npm test
 npm run simulator
 ```
 
-Open `http://127.0.0.1:3939`. Join `https://zoom.us/j/123456789`, click the simulator admission endpoint if driving the API, and assign a local task. The simulator never needs a Zoom or OpenAI account.
+Open `http://127.0.0.1:3939`. Join `https://zoom.us/j/123456789`; the recorded scenario moves through joining and waiting-room admission automatically, after which you can assign a local task. The simulator never needs a Zoom or OpenAI account.
+
+The simulator replays committed mono PCM16 speech recordings, including a barge-in turn, and returns rendered 1280×720 fake-Zoom frames for joining, waiting-room, in-meeting, and sharing states.
 
 ## Deploy on a dedicated Mac
 
@@ -23,12 +25,12 @@ Robin supports a dedicated Apple-silicon Mac running macOS 14 or newer with a pe
 ```bash
 ./scripts/bootstrap-macos.sh
 ./scripts/keychain-secret.sh set OPENAI_API_KEY
-./scripts/keychain-secret.sh set ROBIN_PANEL_TOKEN
+./scripts/keychain-secret.sh generate ROBIN_PANEL_TOKEN
 ./scripts/install-launchd.sh
 ./scripts/doctor.sh
 ```
 
-Then complete the one-time permission and Zoom-login steps in [Deployment](docs/DEPLOY.md). Do not use a personal everyday desktop: Robin’s isolation and sharing guarantees assume a dedicated OS user and display.
+Bootstrap deliberately does not start persistent services. If BlackHole has just been installed it exits with a reboot instruction; rerun it after reboot. Complete the permission and Zoom-login steps in [Deployment](docs/DEPLOY.md) before installing the services. Do not use a personal everyday desktop: Robin’s isolation and sharing guarantees assume a dedicated OS user and display.
 
 ## Commands
 

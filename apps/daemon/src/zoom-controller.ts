@@ -23,6 +23,9 @@ export class ZoomLifecycleController {
         const result = await this.worker.run({ id: randomUUID(), goal: "Complete the ordinary Zoom join flow. Handle only normal join-audio, preview, waiting-room, and meeting dialogs. Do not enter credentials or change settings. Finish when visibly in the meeting or waiting room.", constraints: ["Normal Zoom meeting controls only", "No credentials", "No security settings"], successCriteria: ["In meeting or waiting room is visually verified"] }, signal);
         if (signal.aborted) return;
         if (result.status !== "completed") { await this.orchestrator.humanTakeover(result.summary); return; }
+        if (result.observedState === "zoom_waiting_room") { if (this.orchestrator.state.state === "joining") this.orchestrator.markMeetingState("waiting_room"); ambiguous = 0; }
+        else if (result.observedState === "zoom_in_meeting") { if (["joining", "waiting_room"].includes(this.orchestrator.state.state)) this.orchestrator.markMeetingState("in_meeting"); return; }
+        else { await this.orchestrator.humanTakeover("Zoom recovery did not return a verified meeting state."); return; }
       }
       await new Promise(resolve => setTimeout(resolve, this.pollMs));
     }

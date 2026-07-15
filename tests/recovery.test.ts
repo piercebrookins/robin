@@ -31,4 +31,12 @@ describe("bounded recovery", () => {
     new ZoomLifecycleController(base, worker, robin, events, 1, 2, 1).start(); await new Promise(resolve => setTimeout(resolve, 10));
     expect(robin.snapshot("simulator").health.takeover).toBe(true);
   });
+
+  it("accepts a visually verified meeting state from computer-use recovery", async () => {
+    const desktop = new SimulatedDesktopHarness(), events = new EventBus();
+    const worker: TaskWorker = { run: async () => ({ status: "completed", summary: "Meeting visible", actions: 2, observedState: "zoom_in_meeting" }) };
+    const robin = new RobinOrchestrator(events, new PolicyEngine(), desktop, worker); await robin.join("https://zoom.us/j/123456789");
+    new ZoomLifecycleController(desktop, worker, robin, events, 1, 5, 1).start(); await new Promise(resolve => setTimeout(resolve, 15));
+    expect(robin.state.state).toBe("in_meeting"); expect(robin.snapshot("simulator").health.takeover).toBe(false);
+  });
 });

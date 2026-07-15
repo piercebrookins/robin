@@ -28,4 +28,4 @@ Robin does not enter credentials. Take over through the protected console, sign 
 
 ## Control panel is unauthorized
 
-Store a new token with `./scripts/keychain-secret.sh set ROBIN_PANEL_TOKEN`, reinstall/restart the launch service, and enter the same token when the panel prompts. Do not expose the panel on a public interface.
+Generate a new token with `./scripts/keychain-secret.sh generate ROBIN_PANEL_TOKEN`, reinstall/restart the launch service, then use `./scripts/keychain-secret.sh copy ROBIN_PANEL_TOKEN` and paste it into the panel prompt. The protected-console clipboard clears after 60 seconds. Do not expose the panel on a public interface or print the token in a terminal on Robin’s workspace display.
