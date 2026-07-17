@@ -7,10 +7,7 @@ This repository implements the hackathon MVP described in `Robin_PRD.md` and `Ro
 ## Quick Start
 
 ```bash
-uv sync
-pnpm install
-uv run python scripts/seed_demo_workspace.py
-make dev
+scripts/setup_partner.sh
 ```
 
 Open:
@@ -18,11 +15,24 @@ Open:
 - Dashboard: http://127.0.0.1:3000
 - Core API: http://127.0.0.1:8787/docs
 
+For a faster install without tests or startup:
+
+```bash
+scripts/setup_partner.sh --skip-tests --no-start
+```
+
+For a provisioned Mac that is ready to exercise real Google Meet, Chrome, BlackHole, and the native bridge:
+
+```bash
+scripts/setup_partner.sh --real-meet
+```
+
 ## Useful Commands
 
 ```bash
 make seed
 make seed-demo
+make setup
 make dev
 make doctor
 make preflight

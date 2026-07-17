@@ -1,4 +1,7 @@
-.PHONY: seed seed-demo dev doctor preflight core web test smoke smoke-test smoke-audio smoke-bridge smoke-capture smoke-listen smoke-leave-cleanup smoke-meet-fixture smoke-meet-recovery smoke-calendar smoke-observability smoke-workspace smoke-retry-present smoke-validation smoke-clarification smoke-queue smoke-dedup smoke-real-meet demo-reset typecheck
+.PHONY: setup seed seed-demo dev doctor preflight core web test smoke smoke-test smoke-audio smoke-bridge smoke-capture smoke-listen smoke-leave-cleanup smoke-meet-fixture smoke-meet-recovery smoke-calendar smoke-observability smoke-workspace smoke-retry-present smoke-validation smoke-clarification smoke-queue smoke-dedup smoke-real-meet demo-reset typecheck
+
+setup:
+	scripts/setup_partner.sh
 
 seed:
 	uv run python scripts/seed_demo_workspace.py
