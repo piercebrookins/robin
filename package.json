@@ -1,34 +1,13 @@
 {
-  "name": "robin",
+  "name": "robin-agent",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
-  "engines": { "node": ">=22" },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "dev": "tsx apps/daemon/src/main.ts",
-    "start": "node dist/apps/daemon/src/main.js",
-    "simulator": "ROBIN_MODE=simulator tsx apps/daemon/src/main.ts",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:e2e": "vitest run tests/e2e",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "doctor": "tsx apps/daemon/src/cli.ts doctor",
-    "mac-helper:build": "swift build -c release --package-path apps/mac-helper",
-    "check": "npm run typecheck && npm test"
+    "web": "pnpm --dir apps/web dev",
+    "test": "pnpm --dir apps/web test",
+    "typecheck": "pnpm --dir apps/web typecheck"
   },
-  "dependencies": {
-    "@fastify/static": "^10.1.0",
-    "fastify": "^5.6.2",
-    "openai": "^6.15.0",
-    "ws": "^8.18.3",
-    "zod": "^4.1.12"
-  },
-  "devDependencies": {
-    "@types/node": "^24.10.1",
-    "@types/ws": "^8.18.1",
-    "tsx": "^4.20.6",
-    "typescript": "^5.9.3",
-    "vitest": "^4.0.8"
+  "engines": {
+    "node": ">=22"
   }
 }

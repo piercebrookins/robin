@@ -1,0 +1,73 @@
+runtime:
+  environment: development
+  log_level: INFO
+  max_concurrent_tasks: 2
+  acknowledgement_deadline_ms: 4000
+  speech_floor_silence_ms: 400
+  speech_floor_max_wait_ms: 3000
+  min_free_disk_mb: 512
+
+model:
+  primary: gpt-5.6
+  intent_confidence_accept: 0.75
+  intent_confidence_confirm: 0.60
+  intent_timeout_seconds: 4.0
+
+audio:
+  mode: "simulator"
+  bridge_mode: "simulator"
+  # For native bridge mode after `swift build --package-path apps/macos-bridge`:
+  # bridge_mode: "process"
+  # bridge_executable: "./apps/macos-bridge/.build/debug/robin-macos-bridge"
+  bridge_executable: null
+  capture_bundle_id: "com.google.Chrome"
+  capture_sample_duration_ms: 1500
+  capture_loop_interval_ms: 500
+  speech_model: "gpt-4o-mini-tts"
+  transcription_model: "gpt-4o-mini-transcribe"
+  speech_voice: "alloy"
+  speech_format: "wav"
+  output_device_name: "BlackHole 2ch"
+  post_speech_cooldown_ms: 700
+  simulator_transcript: "Robin, use the finance files to compare the quarterly results and make slides."
+
+browser:
+  meet_base_url: "https://meet.google.com"
+  automation_mode: "simulator"
+  allowed_meet_hosts: ["meet.google.com"]
+  # For real Google Meet control:
+  # automation_mode: "playwright"
+  # executable_path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  executable_path: null
+  profile_dir: "~/Library/Application Support/Robin/Chrome"
+  recovery_screenshot_dir: "./RobinWorkspace/sessions/browser-recovery"
+  headless: false
+  remote_debugging_port: 9222
+  navigation_timeout_ms: 30000
+  prejoin_timeout_ms: 20000
+  admission_timeout_ms: 120000
+  ui_action_retries: 1
+  ui_recovery_pause_ms: 250
+
+workspace:
+  root: "./RobinWorkspace"
+  source_dir: "source-data"
+  generated_dir: "generated"
+  sessions_dir: "sessions"
+  max_file_size_mb: 50
+  allowed_extensions: [".csv", ".xlsx", ".pdf"]
+
+presentation:
+  base_url: "http://127.0.0.1:3000/present"
+  default_slide_count: 4
+
+database:
+  path: "./RobinWorkspace/robin.db"
+
+calendar:
+  enabled: false
+  provider: "local"
+  file_path: "./RobinWorkspace/source-data/calendar_demo.ics"
+  lookahead_hours: 12
+  auto_join: false
+  join_early_seconds: 60
