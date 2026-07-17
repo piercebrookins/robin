@@ -26,7 +26,9 @@ class PageDriver(Protocol):
 @dataclass
 class SimulatedPageDriver:
     url: str = "about:blank"
-    visible_keys: set[str] = field(default_factory=lambda: {"join_button", "mute_button", "camera_button"})
+    visible_keys: set[str] = field(
+        default_factory=lambda: {"join_button", "mute_button", "camera_button", "prejoin_mute_button", "prejoin_camera_button"}
+    )
     clicked: list[str] = field(default_factory=list)
 
     async def goto(self, url: str, timeout_ms: int) -> None:
@@ -38,6 +40,8 @@ class SimulatedPageDriver:
         if key == "join_button":
             self.visible_keys.add("joined_signal")
             self.visible_keys.add("leave_button")
+        if key in {"prejoin_mute_button", "prejoin_camera_button"}:
+            self.visible_keys.discard(key)
         if key == "present_button":
             self.visible_keys.add("stop_presenting_button")
         if key == "stop_presenting_button":
@@ -59,6 +63,8 @@ class SimulatedPageDriver:
 
     def _key_for(self, candidates: list[SelectorCandidate]) -> str:
         for key, known in {
+            "prejoin_mute_button": "Turn off microphone|Mute microphone",
+            "prejoin_camera_button": "Turn off camera",
             "join_button": "Join now|Ask to join",
             "leave_button": "Leave call|Leave meeting",
             "mute_button": "Turn off microphone|Mute microphone|Microphone",
