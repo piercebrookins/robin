@@ -34,9 +34,12 @@ audio:
 browser:
   meet_base_url: "https://meet.google.com"
   automation_mode: "simulator"
+  connection_mode: "launch"
+  cdp_endpoint: "http://127.0.0.1:9222"
   allowed_meet_hosts: ["meet.google.com"]
   # For real Google Meet control:
   # automation_mode: "playwright"
+  # connection_mode: "cdp"
   # executable_path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   executable_path: null
   profile_dir: "~/Library/Application Support/Robin/Chrome"

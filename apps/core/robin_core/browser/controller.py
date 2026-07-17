@@ -11,6 +11,7 @@ class BrowserController:
     config: BrowserConfig = field(default_factory=BrowserConfig)
     pages: dict[str, PageDriver] = field(default_factory=dict)
     _playwright: object | None = None
+    _browser: object | None = None
     _context: object | None = None
 
     async def open_page(self, name: str, url: str) -> PageDriver:
@@ -40,6 +41,9 @@ class BrowserController:
         if self._context:
             await self._context.close()
             self._context = None
+        if self._browser:
+            await self._browser.close()
+            self._browser = None
         if self._playwright:
             await self._playwright.stop()
             self._playwright = None
@@ -50,22 +54,32 @@ class BrowserController:
 
             self._playwright = await async_playwright().start()
         if self._context is None:
-            self.config.profile_dir.mkdir(parents=True, exist_ok=True)
-            launch_kwargs: dict[str, object] = {
-                "headless": self.config.headless,
-                "args": [
-                    f"--remote-debugging-port={self.config.remote_debugging_port}",
-                    "--use-fake-ui-for-media-stream",
-                    "--autoplay-policy=no-user-gesture-required",
-                ],
-            }
-            if self.config.executable_path:
-                launch_kwargs["executable_path"] = str(self.config.executable_path)
-            self._context = await self._playwright.chromium.launch_persistent_context(
-                str(self.config.profile_dir),
-                **launch_kwargs,
-            )
+            if self.config.connection_mode == "cdp":
+                self._browser = await self._playwright.chromium.connect_over_cdp(self.config.cdp_endpoint)
+                contexts = self._browser.contexts
+                self._context = contexts[0] if contexts else await self._browser.new_context()
+            else:
+                self._context = await self._launch_persistent_context()
         page = await self._context.new_page()
         driver = PlaywrightPageDriver(page)
         await driver.goto(url, self.config.navigation_timeout_ms)
         return driver
+
+    async def _launch_persistent_context(self):
+        if self._playwright is None:
+            raise RuntimeError("Playwright is not initialized.")
+        self.config.profile_dir.mkdir(parents=True, exist_ok=True)
+        launch_kwargs: dict[str, object] = {
+            "headless": self.config.headless,
+            "args": [
+                f"--remote-debugging-port={self.config.remote_debugging_port}",
+                "--use-fake-ui-for-media-stream",
+                "--autoplay-policy=no-user-gesture-required",
+            ],
+        }
+        if self.config.executable_path:
+            launch_kwargs["executable_path"] = str(self.config.executable_path)
+        return await self._playwright.chromium.launch_persistent_context(
+            str(self.config.profile_dir),
+            **launch_kwargs,
+        )

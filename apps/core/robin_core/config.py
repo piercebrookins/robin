@@ -31,6 +31,8 @@ class ModelConfig(BaseModel):
 class BrowserConfig(BaseModel):
     meet_base_url: str = "https://meet.google.com"
     automation_mode: str = "simulator"
+    connection_mode: str = "launch"
+    cdp_endpoint: str = "http://127.0.0.1:9222"
     allowed_meet_hosts: list[str] = Field(default_factory=lambda: ["meet.google.com"])
     executable_path: Path | None = None
     profile_dir: Path = Path("~/Library/Application Support/Robin/Chrome")
