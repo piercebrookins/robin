@@ -34,13 +34,24 @@ echo "- Sign into Robin's Google account in the Chrome window that opens."
 echo "- Leave the window open while running real Meet smoke tests."
 echo
 
-"$CHROME" \
-  --remote-debugging-port="$PORT" \
-  --user-data-dir="$PROFILE_DIR" \
-  --no-first-run \
-  --no-default-browser-check \
-  --autoplay-policy=no-user-gesture-required \
-  "$START_URL" >/tmp/robin-chrome.log 2>&1 &
+if [[ "$CHROME" == "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
+  # `open -na` forces a separate macOS app instance even when normal Chrome is running.
+  open -na "Google Chrome" --args \
+    --remote-debugging-port="$PORT" \
+    --user-data-dir="$PROFILE_DIR" \
+    --no-first-run \
+    --no-default-browser-check \
+    --autoplay-policy=no-user-gesture-required \
+    "$START_URL" >/tmp/robin-chrome.log 2>&1 &
+else
+  "$CHROME" \
+    --remote-debugging-port="$PORT" \
+    --user-data-dir="$PROFILE_DIR" \
+    --no-first-run \
+    --no-default-browser-check \
+    --autoplay-policy=no-user-gesture-required \
+    "$START_URL" >/tmp/robin-chrome.log 2>&1 &
+fi
 
 deadline=$((SECONDS + 20))
 until curl -fsS "http://127.0.0.1:$PORT/json/version" >/dev/null 2>&1; do

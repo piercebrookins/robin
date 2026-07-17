@@ -98,8 +98,9 @@ class PlaywrightPageDriver:
     async def is_visible(self, candidates: list[SelectorCandidate], timeout_ms: int) -> bool:
         for candidate in candidates:
             try:
-                if await self._locator(candidate).first.is_visible(timeout=timeout_ms):
-                    return True
+                locator = self._locator(candidate).first
+                await locator.wait_for(state="visible", timeout=timeout_ms)
+                return True
             except Exception:
                 continue
         return False
