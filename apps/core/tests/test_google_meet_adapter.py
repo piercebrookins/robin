@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from robin_core.browser.controller import BrowserController
+from robin_core.browser.native_dialog import ShareDialogError, ShareDialogEvent
 from robin_core.browser.page_driver import SimulatedPageDriver
 from robin_core.config import BrowserConfig
 from robin_core.meeting.adapters.google_meet import GoogleMeetAdapter
@@ -31,8 +32,13 @@ async def test_google_meet_simulator_join_flow_clicks_prejoin_controls() -> None
 
 
 @pytest.mark.asyncio
-async def test_google_meet_simulator_present_flow_opens_presentation_page() -> None:
-    config = BrowserConfig(automation_mode="simulator")
+async def test_google_meet_simulator_present_flow_opens_presentation_page(
+    tmp_path: Path,
+) -> None:
+    config = BrowserConfig(
+        automation_mode="simulator",
+        recovery_screenshot_dir=tmp_path / "recovery",
+    )
     browser = BrowserController(config)
     adapter = GoogleMeetAdapter(browser, config)
 
@@ -45,6 +51,66 @@ async def test_google_meet_simulator_present_flow_opens_presentation_page() -> N
     assert browser.pages["presentation"].url == "http://127.0.0.1:3000/present/task-1"
     assert adapter.meet_page is not None
     assert "present_button" in adapter.meet_page.clicked
+    assert "share_tab_option" in adapter.meet_page.clicked
+    assert adapter.share_dialog_result is not None
+    assert adapter.share_dialog_result.picker_closed is True
+    assert adapter.presentation_evidence_path is not None
+    assert Path(adapter.presentation_evidence_path).exists()
+    assert adapter.recovery_events is not None
+    readiness = next(
+        event for event in adapter.recovery_events if event.action == "presentation_ready"
+    )
+    assert readiness.recovered is True
+    assert "task=task-1" in readiness.error
+
+
+@pytest.mark.asyncio
+async def test_google_meet_refuses_to_share_mismatched_presentation(tmp_path: Path) -> None:
+    config = BrowserConfig(
+        automation_mode="simulator",
+        recovery_screenshot_dir=tmp_path / "recovery",
+    )
+    browser = MismatchedPresentationBrowser(config)
+    share_dialog = TrackingShareDialog()
+    adapter = GoogleMeetAdapter(browser, config, share_dialog=share_dialog)
+
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    await adapter.join()
+    with pytest.raises(RuntimeError, match="Presentation task mismatch"):
+        await adapter.start_presenting("http://127.0.0.1:3000/present/task-1?revision=1")
+
+    assert share_dialog.called is False
+    assert adapter.presenting is False
+    assert adapter.meet_page is not None
+    assert "present_button" not in adapter.meet_page.clicked
+    assert adapter.recovery_events is not None
+    readiness = adapter.recovery_events[-1]
+    assert readiness.action == "presentation_ready"
+    assert readiness.recovered is False
+    assert readiness.screenshot_path is not None
+    assert Path(readiness.screenshot_path).exists()
+
+
+@pytest.mark.asyncio
+async def test_google_meet_does_not_claim_presenting_when_native_picker_fails(
+    tmp_path: Path,
+) -> None:
+    config = BrowserConfig(
+        automation_mode="simulator",
+        recovery_screenshot_dir=tmp_path / "recovery",
+    )
+    browser = BrowserController(config)
+    adapter = GoogleMeetAdapter(browser, config, share_dialog=FailingShareDialog())
+
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    await adapter.join()
+    with pytest.raises(ShareDialogError, match="picker failed"):
+        await adapter.start_presenting("http://127.0.0.1:3000/present/task-1")
+
+    assert adapter.presenting is False
+    assert adapter.state == MeetingState.LISTENING
+    assert adapter.recovery_events is not None
+    assert adapter.recovery_events[-1].action == "share_dialog.attempt_failed"
 
 
 @pytest.mark.asyncio
@@ -88,7 +154,9 @@ async def test_google_meet_recovers_from_transient_present_click_failure(tmp_pat
 
     assert adapter.state == MeetingState.PRESENTING
     assert adapter.recovery_events is not None
-    assert any(event.action == "present_button" and event.recovered for event in adapter.recovery_events)
+    assert any(
+        event.action == "present_button" and event.recovered for event in adapter.recovery_events
+    )
     assert browser.pages["presentation"].url == "http://127.0.0.1:3000/present/task-1"
 
 
@@ -156,6 +224,34 @@ class FaultyBrowserController(BrowserController):
             page = FaultySimulatedPageDriver(self.failures)
         else:
             page = SimulatedPageDriver()
+        await page.goto(url, self.config.navigation_timeout_ms)
+        self.pages[name] = page
+        return page
+
+
+class FailingShareDialog:
+    async def select_and_share(self, source_title: str):
+        raise ShareDialogError(
+            "picker failed",
+            [ShareDialogEvent("attempt_failed", 1, False, "source missing")],
+        )
+
+
+class TrackingShareDialog:
+    def __init__(self):
+        self.called = False
+
+    async def select_and_share(self, source_title: str):
+        self.called = True
+        raise AssertionError("share dialog must not run for an invalid presentation")
+
+
+class MismatchedPresentationBrowser(BrowserController):
+    async def open_page(self, name: str, url: str):
+        page = SimulatedPageDriver(
+            presentation_task_id="wrong-task" if name == "presentation" else None,
+            presentation_revision="1" if name == "presentation" else None,
+        )
         await page.goto(url, self.config.navigation_timeout_ms)
         self.pages[name] = page
         return page

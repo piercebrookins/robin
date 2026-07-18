@@ -183,6 +183,7 @@ replacements = {
     'automation_mode: "simulator"': 'automation_mode: "playwright"',
     'connection_mode: "launch"': 'connection_mode: "cdp"',
     'executable_path: null': 'executable_path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"',
+    'share_dialog_mode: "simulator"': 'share_dialog_mode: "cua_driver"',
 }
 for old, new in replacements.items():
     text = text.replace(old, new, 1)
@@ -199,6 +200,11 @@ real_meet_prereq_notes() {
   if [[ ! -d "/Library/Audio/Plug-Ins/HAL/BlackHole2ch.driver" && ! -d "/Library/Audio/Plug-Ins/HAL/BlackHole16ch.driver" ]]; then
     warn "BlackHole was not found. Install BlackHole 2ch before real audio loopback testing."
   fi
+  if ! has_cmd cua-driver; then
+    warn "Codex/macOS Computer Use (cua-driver) was not found on PATH. Chrome's native share picker cannot be automated."
+  elif ! cua-driver check_permissions '{"prompt":false}' >/dev/null 2>&1; then
+    warn "Codex/macOS Computer Use permissions are incomplete. Grant Accessibility and Screen Recording to CuaDriver.app."
+  fi
   cat <<'EOF'
 Before real Meet smoke:
 1. Run `make launch-chrome`.
@@ -206,7 +212,8 @@ Before real Meet smoke:
 3. Leave that Chrome window open while running Robin.
 4. Grant Screen Recording and Accessibility to the terminal/app running Robin.
 5. In Google Meet settings, choose BlackHole 2ch as Robin's microphone.
-6. Have a second participant join the same Meet to verify Robin can be heard.
+6. Confirm CuaDriver.app has Accessibility and Screen Recording permission.
+7. Have a second participant join the same Meet to verify Robin can be heard.
 EOF
 }
 
@@ -241,6 +248,9 @@ if [[ "$RUN_TESTS" -eq 1 ]]; then
   pnpm --dir apps/web test
   pnpm --dir apps/web typecheck
   make smoke-bridge
+  if [[ "$REAL_MEET" -eq 1 ]]; then
+    make smoke-share-dialog-fixture
+  fi
 fi
 
 if [[ "$START_APP" -eq 1 ]]; then

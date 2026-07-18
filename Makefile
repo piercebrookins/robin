@@ -1,4 +1,4 @@
-.PHONY: setup launch-chrome seed seed-demo dev doctor preflight core web test smoke smoke-test smoke-audio smoke-bridge smoke-capture smoke-listen smoke-leave-cleanup smoke-meet-fixture smoke-meet-recovery smoke-calendar smoke-observability smoke-workspace smoke-retry-present smoke-validation smoke-clarification smoke-queue smoke-dedup smoke-real-meet demo-reset typecheck
+.PHONY: setup launch-chrome seed seed-demo dev doctor preflight core web test smoke smoke-test smoke-audio smoke-bridge smoke-capture smoke-listen smoke-leave-cleanup smoke-meet-fixture smoke-meet-recovery smoke-share-dialog-fixture smoke-calendar smoke-observability smoke-workspace smoke-retry-present smoke-validation smoke-clarification smoke-queue smoke-dedup smoke-real-meet demo-reset typecheck
 
 setup:
 	scripts/setup_partner.sh
@@ -55,6 +55,9 @@ smoke-meet-fixture:
 
 smoke-meet-recovery:
 	uv run python scripts/smoke_meet_recovery.py
+
+smoke-share-dialog-fixture:
+	uv run python scripts/smoke_share_dialog_fixture.py
 
 smoke-calendar:
 	uv run python scripts/smoke_calendar.py

@@ -1515,6 +1515,8 @@ The source chooser is outside the normal page DOM. Use:
 2. GPT-5.6 computer-use recovery if Accessibility lookup fails.
 3. An optional Chromium testing flag only as a demo fallback, not as the primary production path.
 
+The MVP implements the Accessibility path through Codex/macOS Computer Use (`cua-driver`). It resolves the single Chrome process bound to Robin's loopback-only debugging port, snapshots only that process's on-screen windows, targets the configured `Robin Presentation` title, and brackets each selection/confirmation action with a new Accessibility snapshot. Recovery screenshots, Accessibility-tree dumps, and `share-dialog-trace.jsonl` are stored under the browser recovery directory. After Chrome begins capture, verification temporarily uses Accessibility-only mode to avoid competing with the active screen stream, then restores the prior capture mode. Robin does not transition to `PRESENTING` until the presentation task/revision is ready with no error banner, the picker is absent, and Meet exposes a presenting signal.
+
 ### 23.3 Share Verification
 
 Verify at least two signals:
@@ -2655,4 +2657,3 @@ The implementation should be checked against current primary documentation befor
 - [Playwright BrowserContext](https://playwright.dev/python/docs/api/class-browsercontext)
 - [Google Meet Presentation Controls](https://support.google.com/meet/answer/9308856)
 - [BlackHole Audio Loopback Driver](https://github.com/ExistentialAudio/BlackHole)
-

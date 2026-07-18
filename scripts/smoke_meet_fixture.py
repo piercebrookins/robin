@@ -25,14 +25,21 @@ MEET_FIXTURE = b"""<!doctype html>
   <button data-testid="leave-button" hidden>Leave call</button>
   <button data-testid="joined-signal" hidden>Leave meeting</button>
   <button data-testid="present-button">Present now</button>
+  <button data-testid="share-tab-option" hidden>A tab</button>
   <button data-testid="stop-presenting-button" hidden>Stop presenting</button>
+  <span data-testid="presenting-signal" hidden>You are presenting</span>
   <script>
     document.querySelector('[data-testid="join-button"]').addEventListener('click', () => {
       document.querySelector('[data-testid="leave-button"]').hidden = false;
       document.querySelector('[data-testid="joined-signal"]').hidden = false;
     });
     document.querySelector('[data-testid="present-button"]').addEventListener('click', () => {
+      document.querySelector('[data-testid="share-tab-option"]').hidden = false;
+    });
+    document.querySelector('[data-testid="share-tab-option"]').addEventListener('click', () => {
+      document.querySelector('[data-testid="share-tab-option"]').hidden = true;
       document.querySelector('[data-testid="stop-presenting-button"]').hidden = false;
+      document.querySelector('[data-testid="presenting-signal"]').hidden = false;
     });
   </script>
 </body>
@@ -44,7 +51,12 @@ async def serve_fixture() -> tuple[asyncio.AbstractServer, int]:
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         request = await reader.read(2048)
         path = request.split(b" ", 2)[1] if request.startswith(b"GET ") else b"/"
-        body = MEET_FIXTURE if path != b"/present" else b"<main data-robin-presentation-ready='true'>Ready</main>"
+        body = (
+            b"<main data-robin-presentation-ready='true' data-robin-task-id='task-1' "
+            b"data-robin-revision='1'>Ready</main>"
+            if path.startswith(b"/present/task-1")
+            else MEET_FIXTURE
+        )
         writer.write(
             b"HTTP/1.1 200 OK\r\n"
             b"content-type: text/html; charset=utf-8\r\n"
@@ -75,7 +87,7 @@ async def main() -> None:
     try:
         await adapter.navigate(f"http://127.0.0.1:{port}/meet")
         await adapter.join()
-        await adapter.start_presenting(f"http://127.0.0.1:{port}/present")
+        await adapter.start_presenting(f"http://127.0.0.1:{port}/present/task-1?revision=1")
         if adapter.state != MeetingState.PRESENTING or not adapter.presenting:
             raise SystemExit("Meet fixture did not reach presenting state")
         print(f"Meet fixture smoke passed: profile={config.profile_dir}")
