@@ -15,8 +15,15 @@ class BrowserController:
     _context: object | None = None
 
     async def open_page(self, name: str, url: str) -> PageDriver:
+        existing = self.pages.get(name)
+        if existing and not existing.is_closed():
+            if existing.url != url:
+                await existing.goto(url, self.config.navigation_timeout_ms)
+            await existing.bring_to_front()
+            return existing
+        self.pages.pop(name, None)
         if self.config.automation_mode == "playwright":
-            page = await self._open_playwright_page(url)
+            page = await self._open_playwright_page(name, url)
         else:
             page = SimulatedPageDriver()
             await page.goto(url, self.config.navigation_timeout_ms)
@@ -48,22 +55,42 @@ class BrowserController:
             await self._playwright.stop()
             self._playwright = None
 
-    async def _open_playwright_page(self, url: str) -> PageDriver:
+    async def _open_playwright_page(self, name: str, url: str) -> PageDriver:
         if self._playwright is None:
             from playwright.async_api import async_playwright
 
             self._playwright = await async_playwright().start()
         if self._context is None:
             if self.config.connection_mode == "cdp":
-                self._browser = await self._playwright.chromium.connect_over_cdp(self.config.cdp_endpoint)
+                self._browser = await self._playwright.chromium.connect_over_cdp(
+                    self.config.cdp_endpoint,
+                    no_defaults=True,
+                )
                 contexts = self._browser.contexts
                 self._context = contexts[0] if contexts else await self._browser.new_context()
             else:
                 self._context = await self._launch_persistent_context()
-        page = await self._context.new_page()
+        page = self._matching_context_page(name, url)
+        if page is None:
+            page = await self._context.new_page()
         driver = PlaywrightPageDriver(page)
-        await driver.goto(url, self.config.navigation_timeout_ms)
+        if driver.url != url:
+            await driver.goto(url, self.config.navigation_timeout_ms)
         return driver
+
+    def _matching_context_page(self, name: str, url: str):
+        if self._context is None:
+            return None
+        pages = [page for page in self._context.pages if not page.is_closed()]
+        exact = next((page for page in pages if page.url == url), None)
+        if exact is not None:
+            return exact
+        if name == "meet":
+            return next(
+                (page for page in pages if page.url.startswith(self.config.meet_base_url)),
+                None,
+            )
+        return None
 
     async def _launch_persistent_context(self):
         if self._playwright is None:

@@ -79,6 +79,9 @@ export type SpeechRecord = {
   format: string;
   path: string | null;
   byte_count: number;
+  duration_seconds: number | null;
+  playback_device: string | null;
+  playback_route: string | null;
   started_at: string;
   completed_at: string | null;
   error: string | null;

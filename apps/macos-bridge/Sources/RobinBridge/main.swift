@@ -244,6 +244,13 @@ final class AudioSampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private(set) var sampleCount = 0
     private(set) var byteCount = 0
     private(set) var errorMessage: String?
+    private(set) var peakAmplitude: Float = 0
+    private var squareSum: Double = 0
+    private var amplitudeCount = 0
+
+    var rmsAmplitude: Double {
+        amplitudeCount > 0 ? sqrt(squareSum / Double(amplitudeCount)) : 0
+    }
 
     init(outputPath: String) {
         self.outputURL = URL(fileURLWithPath: outputPath)
@@ -277,6 +284,17 @@ final class AudioSampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         guard status == noErr else {
             errorMessage = "could not copy audio PCM data: \(status)"
             return
+        }
+        if let channels = buffer.floatChannelData {
+            for channel in 0..<Int(format.channelCount) {
+                let samples = channels[channel]
+                for frame in 0..<Int(frames) {
+                    let amplitude = abs(samples[frame])
+                    peakAmplitude = max(peakAmplitude, amplitude)
+                    squareSum += Double(amplitude * amplitude)
+                    amplitudeCount += 1
+                }
+            }
         }
         do {
             if audioFile == nil {
@@ -357,7 +375,9 @@ func captureAudioSample(bundleID: String, outputPath: String, durationMs: Int) a
                 "captured": boolString(ok),
                 "path": outputPath,
                 "samples": "\(recorder.sampleCount)",
-                "bytes": "\(recorder.byteCount)"
+                "bytes": "\(recorder.byteCount)",
+                "peak": "\(recorder.peakAmplitude)",
+                "rms": "\(recorder.rmsAmplitude)"
             ],
             error: recorder.errorMessage
         )

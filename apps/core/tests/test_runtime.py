@@ -7,7 +7,14 @@ from pathlib import Path
 import fitz
 import pytest
 
-from robin_core.config import DatabaseConfig, PresentationConfig, RuntimeConfig, Settings, WorkspaceConfig
+from robin_core.config import (
+    AudioConfig,
+    DatabaseConfig,
+    PresentationConfig,
+    RuntimeConfig,
+    Settings,
+    WorkspaceConfig,
+)
 from robin_core.runtime import RobinRuntime
 from robin_core.schemas import TaskStatus, ValidationReport
 
@@ -61,6 +68,64 @@ async def test_demo_task_generates_deck(tmp_path: Path) -> None:
     assert metrics.speech_count >= 1
     assert any(event.type == "task.completed" for event in runtime.recent_events())
     assert (workspace / "sessions" / "traces" / f"{task.id}.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_join_is_idempotent_and_can_enable_listening(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    settings = Settings(
+        workspace=WorkspaceConfig(root=workspace),
+        database=DatabaseConfig(path=workspace / "robin.db"),
+        audio=AudioConfig(mode="simulator", capture_loop_interval_ms=10_000),
+    )
+    runtime = RobinRuntime(settings)
+    url = "https://meet.google.com/abc-defg-hij"
+
+    first = await runtime.join_meeting(url)
+    second = await runtime.join_meeting(url, start_listening=True)
+
+    assert second.meeting_id == first.meeting_id
+    assert second.capture_loop_running is True
+    assert sum(1 for event in runtime.recent_events() if event.type == "meeting.join.started") == 1
+    assert any(
+        event.type == "meeting.join.duplicate_suppressed"
+        for event in runtime.recent_events()
+    )
+    await runtime.stop_listening_loop()
+
+
+@pytest.mark.asyncio
+async def test_task_work_starts_without_waiting_for_acknowledgement(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    settings = Settings(
+        runtime=RuntimeConfig(max_concurrent_tasks=1),
+        workspace=WorkspaceConfig(root=workspace),
+        database=DatabaseConfig(path=workspace / "robin.db"),
+    )
+    runtime = RobinRuntime(settings)
+    speech_started = asyncio.Event()
+    release_speech = asyncio.Event()
+
+    async def slow_speech(_text: str) -> None:
+        speech_started.set()
+        await release_speech.wait()
+
+    runtime._safe_acknowledge = slow_speech  # type: ignore[method-assign]
+    await runtime.task_slots.acquire()
+
+    task = await asyncio.wait_for(runtime.create_task("Make finance slides."), timeout=0.2)
+    await asyncio.wait_for(speech_started.wait(), timeout=0.2)
+    for _ in range(20):
+        if task.status == TaskStatus.QUEUED:
+            break
+        await asyncio.sleep(0.01)
+
+    assert task.status == TaskStatus.QUEUED
+    release_speech.set()
+    handle = runtime._task_handles[task.id]
+    handle.cancel()
+    runtime.task_slots.release()
+    await handle
 
 
 @pytest.mark.asyncio

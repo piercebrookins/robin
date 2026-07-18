@@ -14,15 +14,19 @@ model:
   intent_timeout_seconds: 4.0
 
 audio:
-  mode: "simulator"
-  bridge_mode: "simulator"
+  mode: "openai"
+  bridge_mode: "process"
   # For native bridge mode after `swift build --package-path apps/macos-bridge`:
   # bridge_mode: "process"
   # bridge_executable: "./apps/macos-bridge/.build/debug/robin-macos-bridge"
-  bridge_executable: null
+  bridge_executable: "./apps/macos-bridge/.build/debug/robin-macos-bridge"
   capture_bundle_id: "com.google.Chrome"
-  capture_sample_duration_ms: 1500
-  capture_loop_interval_ms: 500
+  # Longer windows plus a local RMS gate avoid uploading silent clips.
+  capture_sample_duration_ms: 4000
+  capture_loop_interval_ms: 250
+  silence_rms_threshold: 0.002
+  openai_timeout_seconds: 20
+  openai_max_retries: 1
   speech_model: "gpt-4o-mini-tts"
   transcription_model: "gpt-4o-mini-transcribe"
   speech_voice: "alloy"
@@ -33,15 +37,15 @@ audio:
 
 browser:
   meet_base_url: "https://meet.google.com"
-  automation_mode: "simulator"
-  connection_mode: "launch"
+  automation_mode: "playwright"
+  connection_mode: "cdp"
   cdp_endpoint: "http://127.0.0.1:9222"
   allowed_meet_hosts: ["meet.google.com"]
   # For real Google Meet control:
   # automation_mode: "playwright"
   # connection_mode: "cdp"
   # executable_path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-  executable_path: null
+  executable_path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   profile_dir: "~/Library/Application Support/Robin/Chrome"
   recovery_screenshot_dir: "./RobinWorkspace/sessions/browser-recovery"
   headless: false
@@ -53,7 +57,7 @@ browser:
   ui_action_retries: 1
   ui_recovery_pause_ms: 250
   # Real Meet mode uses Codex/macOS Computer Use only for Chrome-owned dialogs.
-  share_dialog_mode: "simulator"
+  share_dialog_mode: "cua_driver"
   share_source_title: "Robin Presentation"
   share_dialog_timeout_ms: 10000
   share_dialog_retries: 1

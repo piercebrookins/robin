@@ -68,6 +68,10 @@ class RobinRuntime:
         self._subscribers: set[asyncio.Queue[RuntimeSnapshot]] = set()
         self._event_subscribers: set[asyncio.Queue[EventEnvelope]] = set()
         self._listen_handle: asyncio.Task | None = None
+        self._join_lock = asyncio.Lock()
+        self._speech_lock = asyncio.Lock()
+        self._speech_handles: set[asyncio.Task] = set()
+        self._last_spoken_at_ms = 0
         self._calendar_handle: asyncio.Task | None = None
         self._calendar_joined_event_ids: set[str] = set()
         self._calendar_active_event_id: str | None = None
@@ -75,6 +79,7 @@ class RobinRuntime:
         self._pending_confirmation: tuple[MeetingIntent, TranscriptSegment, UUID] | None = None
         self._last_audio_text: str | None = None
         self._last_audio_text_at_ms: int = 0
+        self._last_silence_event_at_ms: int = 0
         self._meet_recovery_event_count = 0
         self.refresh_health()
 
@@ -112,24 +117,75 @@ class RobinRuntime:
         self.audio.virtual_mic_healthy = permissions.audio_device_available
         self.refresh_health()
 
-    async def join_meeting(self, meeting_url: str) -> RuntimeSnapshot:
-        started = time.perf_counter()
-        self.runtime_state = RuntimeState.JOINING_MEETING
-        self.meeting_state = MeetingState.NAVIGATING
-        self.meeting_url = meeting_url
-        await self.emit_event("meeting.join.started", {"meeting_url": meeting_url}, component="meeting")
-        await self.meet.navigate(meeting_url)
-        self.meeting_state = self.meet.state
-        await self.meet.join()
-        self.meeting_state = self.meet.state
-        await self._emit_meet_recovery_events()
-        self.runtime_state = RuntimeState.IN_MEETING
-        await self.emit_event(
-            "meeting.joined",
-            {"meeting_url": meeting_url, "latency_ms": int((time.perf_counter() - started) * 1000)},
-            component="meeting",
-        )
-        return await self.publish()
+    async def join_meeting(
+        self,
+        meeting_url: str,
+        start_listening: bool = False,
+    ) -> RuntimeSnapshot:
+        async with self._join_lock:
+            active_states = {
+                MeetingState.NAVIGATING,
+                MeetingState.PREJOIN,
+                MeetingState.REQUESTING_ADMISSION,
+                MeetingState.JOINED,
+                MeetingState.LISTENING,
+                MeetingState.SPEAKING,
+                MeetingState.PRESENTING,
+            }
+            if self.meeting_url == meeting_url and self.meeting_state in active_states:
+                await self.emit_event(
+                    "meeting.join.duplicate_suppressed",
+                    {"meeting_url": meeting_url},
+                    component="meeting",
+                )
+                if start_listening:
+                    await self.start_listening_loop()
+                return await self.publish()
+            if self.meeting_url and self.meeting_state in active_states:
+                raise ValueError(
+                    "Robin is already in a meeting. Leave it before joining another link."
+                )
+
+            started = time.perf_counter()
+            self.meeting_id = uuid4()
+            self.runtime_state = RuntimeState.JOINING_MEETING
+            self.meeting_state = MeetingState.NAVIGATING
+            self.meeting_url = meeting_url
+            await self.emit_event(
+                "meeting.join.started", {"meeting_url": meeting_url}, component="meeting"
+            )
+            await self.publish()
+            try:
+                await self.meet.navigate(meeting_url)
+                self.meeting_state = self.meet.state
+                await self.publish()
+                await self.meet.join()
+                self.meeting_state = self.meet.state
+                await self._emit_meet_recovery_events()
+                self.runtime_state = RuntimeState.IN_MEETING
+                await self.emit_event(
+                    "meeting.joined",
+                    {
+                        "meeting_url": meeting_url,
+                        "latency_ms": int((time.perf_counter() - started) * 1000),
+                    },
+                    component="meeting",
+                )
+                await self.publish()
+                if start_listening:
+                    return await self.start_listening_loop()
+                return self.snapshot()
+            except Exception as exc:
+                self.runtime_state = RuntimeState.READY
+                self.meeting_state = MeetingState.IDLE
+                self.meeting_url = None
+                await self.emit_event(
+                    "meeting.join.failed",
+                    {"meeting_url": meeting_url, "error": str(exc)},
+                    component="meeting",
+                )
+                await self.publish()
+                raise
 
     def calendar_snapshot(self) -> CalendarSnapshot:
         snapshot = calendar_snapshot(self.settings.calendar)
@@ -322,7 +378,13 @@ class RobinRuntime:
         text = await self.audio.transcribe_file(path)
         return await self.ingest_transcript(text, speaker_name=speaker_name, source="audio_stt")
 
-    async def capture_audio_sample(self, bundle_id: str = "com.google.Chrome", duration_ms: int = 1500, output_name: str | None = None) -> dict:
+    async def capture_audio_sample(
+        self,
+        bundle_id: str = "com.google.Chrome",
+        duration_ms: int = 1500,
+        output_name: str | None = None,
+        emit_capture_event: bool = True,
+    ) -> dict:
         capture_dir = self.workspace.sessions / "captures"
         capture_dir.mkdir(parents=True, exist_ok=True)
         safe_name = output_name or f"capture_{int(time.time() * 1000)}.wav"
@@ -330,18 +392,19 @@ class RobinRuntime:
             raise ValueError("output_name must be a simple filename")
         output_path = capture_dir / safe_name
         response = await self.audio.bridge_client.capture_audio_sample(bundle_id, output_path, duration_ms=duration_ms)
-        await self.emit_event(
-            "audio.capture.sample",
-            {
-                "bundle_id": bundle_id,
-                "duration_ms": duration_ms,
-                "path": str(output_path.relative_to(self.workspace.root)),
-                "ok": response.ok,
-                "result": response.result,
-                "error": response.error,
-            },
-            component="audio",
-        )
+        if emit_capture_event:
+            await self.emit_event(
+                "audio.capture.sample",
+                {
+                    "bundle_id": bundle_id,
+                    "duration_ms": duration_ms,
+                    "path": str(output_path.relative_to(self.workspace.root)),
+                    "ok": response.ok,
+                    "result": response.result,
+                    "error": response.error,
+                },
+                component="audio",
+            )
         return {
             "ok": response.ok,
             "path": output_path.relative_to(self.workspace.root).as_posix(),
@@ -349,21 +412,108 @@ class RobinRuntime:
             "error": response.error,
         }
 
+    async def test_audio_output(self) -> RuntimeSnapshot:
+        text = "Robin voice check. If you can hear this, my meeting audio is working."
+        await self.emit_event(
+            "audio.output.test.started",
+            {"device": self.settings.audio.output_device_name},
+            component="audio",
+        )
+        active_meeting = self.meeting_url is not None and self.meeting_state not in {
+            MeetingState.IDLE,
+            MeetingState.ENDED,
+        }
+        if active_meeting:
+            await self._acknowledge(text)
+        else:
+            await self._speak_and_record(text)
+            await self.publish()
+        speech = self.speech[-1]
+        await self.emit_event(
+            "audio.output.test.passed",
+            {
+                "device": speech.playback_device or self.settings.audio.output_device_name,
+                "duration_seconds": speech.duration_seconds,
+                "mode": speech.mode,
+            },
+            component="audio",
+        )
+        return await self.publish()
+
+    async def test_audio_input(self, duration_ms: int | None = None) -> dict:
+        sample_ms = duration_ms or self.settings.audio.capture_sample_duration_ms
+        await self.emit_event(
+            "audio.input.test.started",
+            {
+                "bundle_id": self.settings.audio.capture_bundle_id,
+                "duration_ms": sample_ms,
+            },
+            component="audio",
+        )
+        result = await self.capture_audio_sample(
+            bundle_id=self.settings.audio.capture_bundle_id,
+            duration_ms=sample_ms,
+            output_name="audio_input_test.wav",
+            emit_capture_event=False,
+        )
+        if not result["ok"]:
+            await self.emit_event("audio.input.test.failed", result, component="audio")
+            await self.publish()
+            return result
+        metrics = result.get("result", {})
+        rms = float(metrics.get("rms", 0.0))
+        peak = float(metrics.get("peak", 0.0))
+        signal = rms >= self.settings.audio.silence_rms_threshold
+        transcript = ""
+        if signal:
+            transcript = (await self.audio.transcribe_file(self.workspace.resolve(result["path"]))).strip()
+        event_type = "audio.input.test.passed" if signal and transcript else "audio.input.test.quiet"
+        payload = {
+            "rms": rms,
+            "peak": peak,
+            "threshold": self.settings.audio.silence_rms_threshold,
+            "transcript": transcript,
+            "path": result["path"],
+        }
+        await self.emit_event(event_type, payload, component="audio")
+        await self.publish()
+        return {"ok": event_type.endswith("passed"), **payload}
+
     async def capture_and_transcribe_once(
         self,
         bundle_id: str | None = None,
         duration_ms: int | None = None,
         speaker_name: str = "Meeting audio",
+        retain_capture: bool = True,
     ) -> RuntimeSnapshot:
         started_ms = int(time.time() * 1000)
         result = await self.capture_audio_sample(
             bundle_id=bundle_id or self.settings.audio.capture_bundle_id,
             duration_ms=duration_ms or self.settings.audio.capture_sample_duration_ms,
+            emit_capture_event=retain_capture,
         )
         if not result["ok"]:
             await self.emit_event("audio.capture.skipped", result, component="audio")
             return await self.publish()
-        text = await self.audio.transcribe_file(self.workspace.resolve(result["path"]))
+        capture_path = self.workspace.resolve(result["path"])
+        rms = float(result.get("result", {}).get("rms", 1.0))
+        if rms < self.settings.audio.silence_rms_threshold:
+            now_ms = int(time.time() * 1000)
+            if now_ms - self._last_silence_event_at_ms >= 30_000:
+                await self.emit_event(
+                    "audio.silence.skipped",
+                    {"rms": rms},
+                    component="audio",
+                )
+                self._last_silence_event_at_ms = now_ms
+            if not retain_capture:
+                capture_path.unlink(missing_ok=True)
+            return await self.publish()
+        try:
+            text = await self.audio.transcribe_file(capture_path)
+        finally:
+            if not retain_capture:
+                capture_path.unlink(missing_ok=True)
         normalized = " ".join(text.lower().split())
         now_ms = int(time.time() * 1000)
         if not normalized:
@@ -415,9 +565,33 @@ class RobinRuntime:
 
     async def _listening_loop(self, bundle_id: str, duration_ms: int, interval_ms: int, max_iterations: int | None) -> None:
         iterations = 0
+        consecutive_failures = 0
         try:
             while max_iterations is None or iterations < max_iterations:
-                await self.capture_and_transcribe_once(bundle_id=bundle_id, duration_ms=duration_ms)
+                now_ms = int(time.time() * 1000)
+                speech_cooldown = max(self.settings.audio.post_speech_cooldown_ms, 0)
+                if (
+                    self.meeting_state == MeetingState.SPEAKING
+                    or now_ms - self._last_spoken_at_ms < speech_cooldown
+                ):
+                    await asyncio.sleep(0.1)
+                    continue
+                try:
+                    await self.capture_and_transcribe_once(
+                        bundle_id=bundle_id,
+                        duration_ms=duration_ms,
+                        retain_capture=False,
+                    )
+                    consecutive_failures = 0
+                except Exception as exc:
+                    consecutive_failures += 1
+                    await self.emit_event(
+                        "audio.listen.iteration_failed",
+                        {"error": str(exc), "consecutive_failures": consecutive_failures},
+                        component="audio",
+                    )
+                    await self.publish()
+                    await asyncio.sleep(min(2**consecutive_failures, 10))
                 iterations += 1
                 await asyncio.sleep(max(interval_ms, 0) / 1000)
         except asyncio.CancelledError:
@@ -444,9 +618,9 @@ class RobinRuntime:
         self.tasks.append(task)
         self.store.upsert("task", task)
         await self.emit_event("task.created", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
-        await self._acknowledge(f"Got it. I’ll work on {task.title}.")
         self._schedule_task(task)
         await self.publish()
+        self._schedule_acknowledgement(f"Got it. I’ll work on {task.title}.")
         return task
 
     async def cancel_task(self, task_id: UUID) -> None:
@@ -614,9 +788,11 @@ class RobinRuntime:
             self.tasks.append(task)
             self.store.upsert("task", task)
             await self.emit_event("task.created", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
-            await self._acknowledge("Got it. I’ll analyze the files and prepare a short deck.")
             self._schedule_task(task)
             await self.publish()
+            self._schedule_acknowledgement(
+                "Got it. I’ll analyze the files and prepare a short deck."
+            )
         elif intent.classification == "task_modification" and intent.referenced_task_id:
             task = self._find_task(intent.referenced_task_id)
             task.revision += 1
@@ -814,8 +990,8 @@ class RobinRuntime:
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
                 await self.emit_event("task.completed", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
-                await self._acknowledge("The analysis and slides are ready.")
                 await self.publish()
+                await self._safe_acknowledge("The analysis and slides are ready.")
         except asyncio.CancelledError:
             task.status = TaskStatus.CANCELLED
             task.updated_at = now_utc()
@@ -828,24 +1004,54 @@ class RobinRuntime:
             task.updated_at = now_utc()
             self.store.upsert("task", task)
             await self.emit_event("task.failed", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
-            await self._acknowledge(self._task_failure_acknowledgement(task))
+            await self.publish()
+            await self._safe_acknowledge(self._task_failure_acknowledgement(task))
+
+    def _schedule_acknowledgement(self, text: str) -> None:
+        handle = asyncio.create_task(self._safe_acknowledge(text))
+        self._speech_handles.add(handle)
+        handle.add_done_callback(self._speech_handles.discard)
+
+    async def _safe_acknowledge(self, text: str) -> None:
+        try:
+            await self._acknowledge(text)
+        except Exception as exc:
+            await self.emit_event(
+                "speech.failed",
+                {"text": text[:120], "error": str(exc)},
+                component="speech",
+            )
             await self.publish()
 
     async def _acknowledge(self, text: str) -> None:
-        previous = self.meeting_state
-        await self._wait_for_speech_floor(text)
-        self.meeting_state = MeetingState.SPEAKING
-        await self.meet.unmute()
-        await self._emit_meet_recovery_events()
+        async with self._speech_lock:
+            previous = self.meeting_state
+            await self._wait_for_speech_floor(text)
+            self.meeting_state = MeetingState.SPEAKING
+            await self.publish()
+            try:
+                await self.meet.unmute()
+                await self._emit_meet_recovery_events()
+                await self._speak_and_record(text)
+            finally:
+                self._last_spoken_at_ms = int(time.time() * 1000)
+                await self.meet.mute()
+                await self._emit_meet_recovery_events()
+                self.meeting_state = previous if previous != MeetingState.IDLE else self.meet.state
+                await self.publish()
+
+    async def _speak_and_record(self, text: str) -> SpeechRecord:
         speech = await self.audio.speak(text)
         if speech.path:
-            speech.path = (Path(self.settings.workspace.sessions_dir) / "speech" / speech.path).as_posix()
+            speech.path = (
+                Path(self.settings.workspace.sessions_dir) / "speech" / speech.path
+            ).as_posix()
         self.speech.append(speech)
         self.store.upsert("speech", speech)
-        await self.meet.mute()
-        await self._emit_meet_recovery_events()
-        self.meeting_state = previous if previous != MeetingState.IDLE else self.meet.state
-        await self.emit_event("speech.completed", speech.model_dump(mode="json"), component="speech")
+        await self.emit_event(
+            "speech.completed", speech.model_dump(mode="json"), component="speech"
+        )
+        return speech
 
     async def _wait_for_speech_floor(self, text: str) -> None:
         wait_ms = self._speech_floor_wait_ms()

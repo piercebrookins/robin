@@ -105,8 +105,9 @@ class SimulatorBridgeClient(BridgeClient):
 
 
 class ProcessBridgeClient(BridgeClient):
-    def __init__(self, executable: Path):
+    def __init__(self, executable: Path, output_device_name: str = "BlackHole 2ch"):
         self.executable = executable
+        self.output_device_name = output_device_name
 
     async def permissions_status(self) -> PermissionStatus:
         response = await self._send("permissions.status", {})
@@ -119,7 +120,10 @@ class ProcessBridgeClient(BridgeClient):
         return await self._send("audio.capture.stop", {})
 
     async def play_audio(self, path: Path) -> BridgeResponse:
-        return await self._send("audio.output.play", {"path": str(path)})
+        return await self._send(
+            "audio.output.play",
+            {"path": str(path), "output_device": self.output_device_name},
+        )
 
     async def screen_capture(self, application: str) -> BridgeResponse:
         return await self._send("screen.capture", {"application": application})
@@ -134,9 +138,15 @@ class ProcessBridgeClient(BridgeClient):
         return await self._send(
             "audio.capture.sample",
             {"bundle_id": bundle_id, "path": str(path), "duration_ms": str(duration_ms)},
+            timeout_seconds=max(duration_ms / 1000 + 10, 15),
         )
 
-    async def _send(self, method: str, params: dict[str, Any]) -> BridgeResponse:
+    async def _send(
+        self,
+        method: str,
+        params: dict[str, Any],
+        timeout_seconds: float = 15,
+    ) -> BridgeResponse:
         if not self.executable.exists():
             raise FileNotFoundError(f"Bridge executable not found: {self.executable}")
         command = BridgeCommand(method=method, params=params).envelope()
@@ -147,7 +157,21 @@ class ProcessBridgeClient(BridgeClient):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await process.communicate(json.dumps(command).encode("utf-8"))
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(json.dumps(command).encode("utf-8")),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError as exc:
+            process.kill()
+            await process.communicate()
+            raise TimeoutError(
+                f"macOS bridge {method} timed out after {timeout_seconds:.1f}s"
+            ) from exc
+        except asyncio.CancelledError:
+            process.kill()
+            await process.communicate()
+            raise
         if process.returncode != 0:
             raise RuntimeError(stderr.decode("utf-8") or stdout.decode("utf-8"))
         return BridgeResponse.model_validate_json(stdout.decode("utf-8"))
@@ -157,5 +181,5 @@ def create_bridge_client(config: AudioConfig) -> BridgeClient:
     if config.bridge_mode == "process":
         if not config.bridge_executable:
             raise ValueError("audio.bridge_executable is required when bridge_mode=process")
-        return ProcessBridgeClient(config.bridge_executable)
+        return ProcessBridgeClient(config.bridge_executable, config.output_device_name)
     return SimulatorBridgeClient()

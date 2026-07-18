@@ -6,8 +6,23 @@ This repository implements the hackathon MVP described in `Robin_PRD.md` and `Ro
 
 ## Quick Start
 
+After the one-time real-Meet setup, every rehearsal starts with one command:
+
 ```bash
-scripts/setup_partner.sh
+make robin
+```
+
+The command prepares a clean rehearsal, launches Robin's dedicated Chrome profile, starts the
+core and dashboard, opens the dashboard, and stays attached to the terminal until you press
+Control-C. Paste the Meet link into the dashboard and choose **Join & listen**. Use
+`scripts/run_robin.sh --keep-state` when you do not want to archive the previous rehearsal.
+The live activity feed reports each audio stage. Under **System details and manual controls**,
+use **Test Robin voice** and **Test hearing (4 sec)** before the first rehearsal.
+
+One-time setup:
+
+```bash
+scripts/setup_partner.sh --real-meet --no-start
 ```
 
 Open:
@@ -46,6 +61,7 @@ make web
 make smoke
 make smoke-test
 make smoke-audio
+make smoke-audio-live
 make smoke-bridge
 make smoke-capture
 make smoke-listen
@@ -70,6 +86,12 @@ ROBIN_REAL_MEET_URL=https://meet.google.com/... make smoke-real-meet
 ```bash
 uv run python scripts/smoke_capture.py --bundle-id com.apple.Safari
 ```
+
+`make smoke-audio-live` is the complete local audio proof. It generates real OpenAI speech,
+routes it to BlackHole 2ch, plays the phrase from Robin's signed-in Chrome, captures Chrome with
+ScreenCaptureKit, and transcribes the result. The hearing check captures audio *coming out of
+Chrome*—in a real Meet, speak from another participant or device. Speaking into the same Mac's
+physical microphone is not Chrome output and is therefore not a valid hearing test.
 
 `make preflight` checks demo readiness: API keys, workspace data, database writes, free disk, internet access, dashboard reachability, presentation URL configuration, browser mode, audio bridge mode, and BlackHole requirements. Simulator mode reports real Google login, Chrome UI control, and macOS capture permissions as not required; switch `browser.automation_mode` and `audio.bridge_mode` in `config/robin.example.yaml` to exercise real-machine prerequisites.
 
@@ -108,7 +130,8 @@ uv run python scripts/smoke_capture.py --bundle-id com.apple.Safari
 - Basic speech floor manager that waits for a configurable silence window before Robin speaks, while ignoring Robin echo transcripts.
 - Swift macOS bridge JSON command contract with Python process client and simulator client.
 - Native bridge permission checks for Screen Recording, Accessibility, microphone, and BlackHole.
-- Native bridge WAV playback routed to a matching BlackHole audio device when available.
+- Native bridge WAV playback routed to the exact configured BlackHole audio device, with playback
+  failures, route, duration, and device reported truthfully.
 - Native bridge ScreenCaptureKit app listing and bounded Chrome audio sample capture command.
 - Bounded audio listening loop that captures, transcribes, deduplicates, and ingests meeting audio as transcript segments.
 - Meeting leave cleanup that stops the listening loop and presentation state before returning Robin to ready.
@@ -130,7 +153,10 @@ audio:
 
 Native ScreenCaptureKit audio routing and real Google Meet screen-share picker control are represented behind adapter interfaces so the app can run and test on a development machine before Mac provisioning is complete.
 
-The dashboard Audio Capture panel can capture a one-off sample or start/stop Robin's listening loop. In simulator mode, the loop uses the configured simulator transcript; in process bridge mode, it captures from the configured app bundle before transcription.
+The dashboard's audio checks verify Robin's voice output and Chrome capture/transcription separately.
+In simulator mode speech is an intentional short tone; real rehearsals must use `audio.mode: openai`
+and `audio.bridge_mode: process`. The live listener rejects silent captures locally before calling
+transcription and times out a stuck native bridge instead of wedging the meeting loop.
 
 For real Google Meet control, set `browser.automation_mode` to `playwright`, `browser.connection_mode` to `cdp`, and `browser.share_dialog_mode` to `cua_driver`. Point `browser.executable_path` at Google Chrome, then run `make launch-chrome` and sign in with Robin's pre-provisioned Google account in that dedicated profile. `cua-driver` must be on `PATH`, and CuaDriver.app needs Accessibility and Screen Recording permission. Computer Use is not used for ordinary Meet controls or credentials; it is bounded to Chrome-owned dialogs that Playwright cannot access.
 Then run `ROBIN_REAL_MEET_URL=... make smoke-real-meet` to join, generate a validated deck, present it, stop sharing, and leave.

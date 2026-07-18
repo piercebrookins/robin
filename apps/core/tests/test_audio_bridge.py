@@ -7,8 +7,46 @@ from pathlib import Path
 import pytest
 
 from robin_core.audio.bridge import AudioBridge
+from robin_core.audio.bridge_client import BridgeResponse, SimulatorBridgeClient
 from robin_core.config import AudioConfig, DatabaseConfig, RuntimeConfig, Settings, WorkspaceConfig
 from robin_core.runtime import RobinRuntime
+
+
+class SilentBridgeClient(SimulatorBridgeClient):
+    async def capture_audio_sample(
+        self,
+        bundle_id: str,
+        path: Path,
+        duration_ms: int = 1500,
+    ) -> BridgeResponse:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"silent audio")
+        return BridgeResponse(
+            id="silent",
+            ok=True,
+            result={"bundle_id": bundle_id, "rms": "0.0001"},
+        )
+
+
+class FailedPlaybackBridgeClient(SimulatorBridgeClient):
+    async def play_audio(self, path: Path) -> BridgeResponse:
+        return BridgeResponse(id="failed", ok=False, error="BlackHole route failed")
+
+
+class SignalBridgeClient(SimulatorBridgeClient):
+    async def capture_audio_sample(
+        self,
+        bundle_id: str,
+        path: Path,
+        duration_ms: int = 1500,
+    ) -> BridgeResponse:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"speech audio")
+        return BridgeResponse(
+            id="signal",
+            ok=True,
+            result={"bundle_id": bundle_id, "rms": "0.05", "peak": "0.2"},
+        )
 
 
 @pytest.mark.asyncio
@@ -22,6 +60,32 @@ async def test_simulator_speech_writes_wav(tmp_path: Path) -> None:
     with wave.open(str(tmp_path / record.path), "rb") as wav:
         assert wav.getframerate() == 24_000
         assert wav.getnchannels() == 1
+    assert record.duration_seconds == pytest.approx(0.18)
+
+
+@pytest.mark.asyncio
+async def test_speech_fails_when_native_playback_fails(tmp_path: Path) -> None:
+    bridge = AudioBridge(
+        AudioConfig(mode="simulator"),
+        tmp_path,
+        bridge_client=FailedPlaybackBridgeClient(),
+    )
+
+    with pytest.raises(RuntimeError, match="BlackHole route failed"):
+        await bridge.speak("This must not be reported as spoken.")
+
+
+@pytest.mark.asyncio
+async def test_streaming_wav_placeholder_sizes_use_actual_payload_duration(tmp_path: Path) -> None:
+    bridge = AudioBridge(AudioConfig(mode="simulator"), tmp_path)
+    record = await bridge.speak("Streaming WAV duration test.")
+    path = tmp_path / str(record.path)
+    content = bytearray(path.read_bytes())
+    content[4:8] = b"\xff\xff\xff\xff"
+    content[40:44] = b"\xff\xff\xff\xff"
+    path.write_bytes(content)
+
+    assert bridge._wav_duration(path) == pytest.approx(0.18)
 
 
 @pytest.mark.asyncio
@@ -179,3 +243,52 @@ async def test_leave_meeting_stops_active_listening_loop(tmp_path: Path) -> None
     assert snapshot.meeting_state.value == "ENDED"
     assert any(event.type == "audio.listen.stopped" for event in runtime.recent_events())
     assert any(event.type == "meeting.leave.cleanup" for event in runtime.recent_events())
+
+
+@pytest.mark.asyncio
+async def test_live_listener_skips_silence_without_transcription_or_file_buildup(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    settings = Settings(
+        workspace=WorkspaceConfig(root=workspace),
+        database=DatabaseConfig(path=workspace / "robin.db"),
+        audio=AudioConfig(mode="simulator", silence_rms_threshold=0.002),
+    )
+    runtime = RobinRuntime(settings)
+    runtime.audio = AudioBridge(
+        settings.audio,
+        workspace / "sessions" / "speech",
+        bridge_client=SilentBridgeClient(),
+    )
+
+    await runtime.capture_and_transcribe_once(retain_capture=False)
+
+    assert not list((workspace / "sessions" / "captures").glob("*.wav"))
+    assert any(event.type == "audio.silence.skipped" for event in runtime.recent_events())
+
+
+@pytest.mark.asyncio
+async def test_audio_input_check_requires_signal_and_transcription(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    settings = Settings(
+        workspace=WorkspaceConfig(root=workspace),
+        database=DatabaseConfig(path=workspace / "robin.db"),
+        audio=AudioConfig(
+            mode="simulator",
+            silence_rms_threshold=0.002,
+            simulator_transcript="Audio check heard clearly.",
+        ),
+    )
+    runtime = RobinRuntime(settings)
+    runtime.audio = AudioBridge(
+        settings.audio,
+        workspace / "sessions" / "speech",
+        bridge_client=SignalBridgeClient(),
+    )
+
+    result = await runtime.test_audio_input(duration_ms=100)
+
+    assert result["ok"] is True
+    assert result["transcript"] == "Audio check heard clearly."
+    assert any(event.type == "audio.input.test.passed" for event in runtime.recent_events())

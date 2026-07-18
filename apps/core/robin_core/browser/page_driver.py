@@ -37,6 +37,8 @@ class PageDriver(Protocol):
 
     async def close(self) -> None: ...
 
+    def is_closed(self) -> bool: ...
+
 
 @dataclass
 class SimulatedPageDriver:
@@ -106,6 +108,9 @@ class SimulatedPageDriver:
 
     async def close(self) -> None:
         return None
+
+    def is_closed(self) -> bool:
+        return False
 
     def _key_for(self, candidates: list[SelectorCandidate]) -> str:
         for key, known in {
@@ -214,6 +219,9 @@ class PlaywrightPageDriver:
 
     async def close(self) -> None:
         await self.page.close()
+
+    def is_closed(self) -> bool:
+        return self.page.is_closed()
 
     def _locator(self, candidate: SelectorCandidate):
         if candidate.role and candidate.name_regex:

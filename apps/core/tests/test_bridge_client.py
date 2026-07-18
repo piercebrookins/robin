@@ -60,3 +60,24 @@ async def test_process_bridge_client_health_after_swift_build(tmp_path: Path) ->
     if permissions.audio_device_available:
         assert "BlackHole" in response.result["output_device"]
         assert response.result["route"] == "engine"
+
+
+@pytest.mark.asyncio
+async def test_process_bridge_passes_configured_output_device(tmp_path: Path) -> None:
+    client = ProcessBridgeClient(tmp_path / "bridge", "Exact Virtual Device")
+    sent: dict[str, object] = {}
+
+    async def fake_send(method: str, params: dict[str, object]):
+        sent.update({"method": method, "params": params})
+        from robin_core.audio.bridge_client import BridgeResponse
+
+        return BridgeResponse(id="test", ok=True, result={"played": "true"})
+
+    client._send = fake_send  # type: ignore[method-assign]
+    await client.play_audio(tmp_path / "voice.wav")
+
+    assert sent["method"] == "audio.output.play"
+    assert sent["params"] == {
+        "path": str(tmp_path / "voice.wav"),
+        "output_device": "Exact Virtual Device",
+    }

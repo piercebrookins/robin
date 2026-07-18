@@ -215,6 +215,9 @@ class SpeechRecord(BaseModel):
     format: str
     path: str | None = None
     byte_count: int = 0
+    duration_seconds: float | None = None
+    playback_device: str | None = None
+    playback_route: str | None = None
     started_at: datetime = Field(default_factory=now_utc)
     completed_at: datetime | None = None
     error: str | None = None
@@ -291,6 +294,7 @@ class RuntimeSnapshot(BaseModel):
 
 class JoinMeetingRequest(BaseModel):
     meeting_url: str
+    start_listening: bool = False
 
 
 class TranscriptIngestRequest(BaseModel):

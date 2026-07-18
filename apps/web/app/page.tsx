@@ -1,282 +1,370 @@
 "use client";
 
-import { Activity, AlertTriangle, BarChart3, CalendarDays, CheckCircle2, Database, Mic, MonitorUp, Play, Radio, RefreshCw, Square, XCircle } from "lucide-react";
+import {
+  Activity,
+  AlertTriangle,
+  CheckCircle2,
+  ExternalLink,
+  LoaderCircle,
+  LogOut,
+  Mic,
+  MonitorUp,
+  Play,
+  RefreshCw,
+  Volume2,
+  Wifi,
+  WifiOff,
+  XCircle,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
-import { CORE_URL, CORE_WS_URL, getCalendar, getEvents, getMetrics, getPreflight, getState, getWorkspace, postJson } from "../lib/api";
-import type { Artifact, AudioCaptureResult, CalendarSnapshot, EventEnvelope, PreflightSnapshot, RuntimeMetrics, RuntimeSnapshot, WorkspaceSnapshot } from "../lib/types";
+import { CORE_URL, CORE_WS_URL, getPreflight, getState, postJson } from "../lib/api";
+import type { Artifact, EventEnvelope, PreflightSnapshot, RuntimeSnapshot } from "../lib/types";
+
+const ACTIVE_TASKS = ["AWAITING_CLARIFICATION", "ACCEPTED", "QUEUED", "EXECUTING", "VALIDATING", "READY_TO_PRESENT", "PRESENTING"];
+const ACTIVE_MEETING = ["NAVIGATING", "PREJOIN", "REQUESTING_ADMISSION", "JOINED", "LISTENING", "SPEAKING", "PRESENTING"];
 
 export default function Dashboard() {
   const [state, setState] = useState<RuntimeSnapshot | null>(null);
-  const [preflight, setPreflight] = useState<PreflightSnapshot | null>(null);
-  const [calendar, setCalendar] = useState<CalendarSnapshot | null>(null);
   const [events, setEvents] = useState<EventEnvelope[]>([]);
-  const [metrics, setMetrics] = useState<RuntimeMetrics | null>(null);
-  const [workspace, setWorkspace] = useState<WorkspaceSnapshot | null>(null);
-  const [meetingUrl, setMeetingUrl] = useState("https://meet.google.com/abc-defg-hij");
-  const [taskText, setTaskText] = useState("Robin, use the finance files to compare our 2024 quarterly results and make a few slides.");
-  const [captureResult, setCaptureResult] = useState<AudioCaptureResult | null>(null);
+  const [meetingUrl, setMeetingUrl] = useState("");
+  const [manualTask, setManualTask] = useState("Robin, use the finance files to compare our 2024 quarterly results and make a few slides.");
+  const [connection, setConnection] = useState<"connecting" | "live" | "offline">("connecting");
+  const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  async function refresh() {
-    try {
-      setState(await getState());
-      setPreflight(await getPreflight());
-      setCalendar(await getCalendar());
-      setEvents(await getEvents());
-      setMetrics(await getMetrics());
-      setWorkspace(await getWorkspace());
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }
+  const [preflight, setPreflight] = useState<PreflightSnapshot | null>(null);
+  const [audioTestMessage, setAudioTestMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    refresh();
-    const id = window.setInterval(refresh, 1500);
-    const socket = new WebSocket(`${CORE_WS_URL}/ws/state`);
-    socket.onmessage = (event) => {
-      setState(JSON.parse(event.data) as RuntimeSnapshot);
-      getPreflight().then(setPreflight).catch(() => undefined);
-      getCalendar().then(setCalendar).catch(() => undefined);
-      getEvents().then(setEvents).catch(() => undefined);
-      getMetrics().then(setMetrics).catch(() => undefined);
-      getWorkspace().then(setWorkspace).catch(() => undefined);
+    let cancelled = false;
+    let retryTimer: number | undefined;
+    let stateSocket: WebSocket | undefined;
+    let eventSocket: WebSocket | undefined;
+
+    const connect = () => {
+      if (cancelled) return;
+      setConnection("connecting");
+      getState().then(setState).catch(() => undefined);
+
+      stateSocket = new WebSocket(`${CORE_WS_URL}/ws/state`);
+      eventSocket = new WebSocket(`${CORE_WS_URL}/ws/events`);
+      stateSocket.onopen = () => {
+        setConnection("live");
+        setError(null);
+      };
+      stateSocket.onmessage = (message) => setState(JSON.parse(message.data) as RuntimeSnapshot);
+      eventSocket.onmessage = (message) => {
+        const next = JSON.parse(message.data) as EventEnvelope;
+        setEvents((current) => {
+          if (next.id !== null && current.some((item) => item.id === next.id)) return current;
+          return [...current, next].slice(-80);
+        });
+      };
+      stateSocket.onclose = () => {
+        if (cancelled) return;
+        setConnection("offline");
+        retryTimer = window.setTimeout(connect, 1200);
+      };
+      stateSocket.onerror = () => stateSocket?.close();
     };
+
+    connect();
     return () => {
-      window.clearInterval(id);
-      socket.close();
+      cancelled = true;
+      if (retryTimer) window.clearTimeout(retryTimer);
+      stateSocket?.close();
+      eventSocket?.close();
     };
   }, []);
 
-  const activeTasks = useMemo(() => state?.tasks.filter((task) => !["COMPLETED", "CANCELLED", "FAILED"].includes(task.status)) ?? [], [state]);
+  const activeTask = useMemo(
+    () => state?.tasks.slice().reverse().find((task) => ACTIVE_TASKS.includes(task.status)),
+    [state],
+  );
+  const inMeeting = state ? ACTIVE_MEETING.includes(state.meeting_state) : false;
+  const currentAction = describeCurrentAction(state, activeTask?.title, activeTask?.status);
 
-  async function act(path: string, body?: unknown) {
+  async function act(path: string, body?: unknown, label = "Working") {
+    setBusy(label);
     try {
       setState(await postJson<RuntimeSnapshot>(path, body));
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(readError(err));
+    } finally {
+      setBusy(null);
     }
   }
 
-  async function captureSample() {
+  async function joinAndListen() {
+    const url = meetingUrl.trim();
+    if (!/^https:\/\/meet\.google\.com\//.test(url)) {
+      setError("Paste a complete Google Meet link first.");
+      return;
+    }
+    await act(
+      "/api/meeting/join",
+      { meeting_url: url, start_listening: true },
+      "Joining Meet",
+    );
+  }
+
+  async function runChecks() {
+    setBusy("Running checks");
     try {
-      setCaptureResult(await postJson<AudioCaptureResult>("/api/audio/capture/sample", { bundle_id: "com.google.Chrome", duration_ms: 1500 }));
+      setPreflight(await getPreflight());
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(readError(err));
+    } finally {
+      setBusy(null);
     }
   }
 
-  async function reindexWorkspace() {
+  async function testAudioInput() {
+    setBusy("Listening for audio test");
+    setAudioTestMessage("Speak from another participant or device for the next four seconds…");
     try {
-      setWorkspace(await postJson<WorkspaceSnapshot>("/api/workspace/reindex"));
-      setEvents(await getEvents());
-      setMetrics(await getMetrics());
+      const result = await postJson<{ ok: boolean; transcript: string; rms: number }>("/api/audio/test/input");
+      setAudioTestMessage(
+        result.ok
+          ? `Heard and transcribed: “${result.transcript}”`
+          : `Chrome was quiet (level ${result.rms.toFixed(4)}). Speak from another participant/device, not Robin's own Mac microphone.`,
+      );
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(readError(err));
+      setAudioTestMessage(null);
+    } finally {
+      setBusy(null);
     }
   }
 
   return (
-    <main className="shell">
-      <aside className="sidebar">
-        <div className="brand"><span className="status-dot" /> Robin</div>
-        <div className="list">
-          <span className="pill">Runtime: {state?.runtime_state ?? "loading"}</span>
-          <span className="pill">Meeting: {state?.meeting_state ?? "loading"}</span>
-          <span className="pill">Listening: {state?.listening ? "yes" : "no"}</span>
-          <span className="pill">Capture: {state?.capture_loop_running ? "running" : "stopped"}</span>
-          <span className="pill">Auto-join: {state?.calendar_auto_join_running ? "running" : "stopped"}</span>
-          <span className="pill">Presenting: {state?.presenting ? "yes" : "no"}</span>
+    <main className="operator-shell">
+      <header className="topbar">
+        <div className="brand-lockup">
+          <span className={`status-beacon ${connection}`} aria-hidden="true" />
+          <div>
+            <strong>Robin</strong>
+            <span>Meeting operator</span>
+          </div>
         </div>
-      </aside>
-
-      <section className="main">
-        <div className="toolbar">
-          <input value={meetingUrl} onChange={(event) => setMeetingUrl(event.target.value)} aria-label="Google Meet URL" />
-          <button className="primary" onClick={() => act("/api/meeting/join", { meeting_url: meetingUrl })} title="Join meeting"><Play size={16} /></button>
-          <button onClick={() => act("/api/meeting/leave")} title="Leave meeting"><Square size={16} /></button>
-          <button className="danger" onClick={() => act("/api/emergency-stop")} title="Emergency stop"><AlertTriangle size={16} /></button>
+        <div className={`connection ${connection}`} aria-live="polite">
+          {connection === "live" ? <Wifi size={16} /> : <WifiOff size={16} />}
+          {connection === "live" ? "Live" : connection === "connecting" ? "Connecting" : "Reconnecting"}
         </div>
+      </header>
 
-        {error && <p className="bad">{error}</p>}
+      <section className="control-surface" aria-labelledby="join-title">
+        <div>
+          <h1 id="join-title">Bring Robin into the meeting</h1>
+          <p>Paste a Meet link. Robin joins muted, starts listening, and reports every step below.</p>
+        </div>
+        <div className="join-row">
+          <input
+            value={meetingUrl}
+            onChange={(event) => setMeetingUrl(event.target.value)}
+            onKeyDown={(event) => event.key === "Enter" && !busy && !inMeeting && joinAndListen()}
+            placeholder="https://meet.google.com/…"
+            aria-label="Google Meet link"
+            disabled={inMeeting || busy !== null}
+          />
+          {!inMeeting ? (
+            <button className="primary join-button" onClick={joinAndListen} disabled={busy !== null || connection !== "live"}>
+              {busy === "Joining Meet" ? <LoaderCircle className="spin" size={18} /> : <Play size={18} />}
+              Join &amp; listen
+            </button>
+          ) : (
+            <button onClick={() => act("/api/meeting/leave", {}, "Leaving Meet")} disabled={busy !== null}>
+              <LogOut size={18} /> Leave
+            </button>
+          )}
+          <button className="emergency" onClick={() => act("/api/emergency-stop", {}, "Stopping Robin")} disabled={busy !== null}>
+            <AlertTriangle size={18} /> Stop
+          </button>
+        </div>
+        {error && <div className="error-banner" role="alert"><XCircle size={18} />{error}</div>}
+      </section>
 
-        <div className="grid">
-          <section className="panel">
-            <h2>Delegate Work</h2>
-            <div className="toolbar">
-              <input value={taskText} onChange={(event) => setTaskText(event.target.value)} aria-label="Simulated transcript or task text" />
-              <button className="primary" onClick={() => act("/api/transcript", { speaker_name: "Demo", text: taskText })} title="Send transcript"><Mic size={16} /></button>
-            </div>
-          </section>
+      <section className="now-strip" aria-live="polite">
+        <div className="now-icon">{busy ? <LoaderCircle className="spin" size={20} /> : <Activity size={20} />}</div>
+        <div>
+          <span>Robin is</span>
+          <strong>{busy ?? currentAction}</strong>
+        </div>
+        <div className="state-chips">
+          <StatusChip ok={inMeeting} label={state?.meeting_state ?? "Starting"} />
+          <StatusChip ok={Boolean(state?.capture_loop_running)} label={state?.capture_loop_running ? "Listening" : "Not listening"} />
+          <StatusChip ok={Boolean(state?.presenting)} label={state?.presenting ? "Presenting" : "Not presenting"} neutral={!state?.presenting} />
+        </div>
+      </section>
 
-          <section className="panel">
-            <h2>Health</h2>
-            <div className="health">
-              {state?.health.map((item) => (
-                <div className="health-line" key={item.name}>
-                  {item.ok ? <CheckCircle2 className="ok" size={17} /> : <XCircle className="bad" size={17} />}
-                  <span><strong>{item.name}</strong> <span className="muted">{item.detail}</span></span>
+      <div className="operator-grid">
+        <section className="timeline-section">
+          <div className="section-heading">
+            <div><h2>Live activity</h2><p>Updates arrive as they happen—no polling or page refresh.</p></div>
+            <span className="event-count">{events.length} events</span>
+          </div>
+          <div className="timeline" aria-live="polite">
+            {events.length === 0 && <div className="empty-state">Waiting for Robin to start…</div>}
+            {events.slice().reverse().slice(0, 18).map((event) => (
+              <div className={`timeline-row ${eventTone(event)}`} key={event.id ?? `${event.type}-${event.timestamp}`}>
+                <span className="timeline-dot" aria-hidden="true" />
+                <div>
+                  <strong>{eventMessage(event)}</strong>
+                  <span>{event.component} · {new Date(event.timestamp).toLocaleTimeString()}</span>
                 </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <aside className="work-section">
+          <div className="section-heading"><div><h2>Work</h2><p>Requests and generated results.</p></div></div>
+          <div className="task-list">
+            {state?.tasks.length === 0 && <div className="empty-state">Say “Robin…” in the meeting to delegate work.</div>}
+            {state?.tasks.slice().reverse().slice(0, 5).map((task) => {
+              const deck = latestArtifact(state.artifacts, task.id, "deck_json");
+              const failed = task.status === "FAILED";
+              return (
+                <article className="task-row" key={task.id}>
+                  <div className="task-topline">
+                    <strong>{task.title}</strong>
+                    <span className={`task-status ${failed ? "failed" : ""}`}>{task.status.replaceAll("_", " ")}</span>
+                  </div>
+                  {task.error && <p className="task-error">{task.error}</p>}
+                  <div className="task-actions">
+                    {deck?.url && <a href={deck.url} target="_blank" rel="noreferrer"><ExternalLink size={15} /> Open deck</a>}
+                    {deck && <button onClick={() => act(`/api/tasks/${task.id}/present`, {}, "Starting presentation")}><MonitorUp size={15} /> Present</button>}
+                    {failed && <button onClick={() => act(`/api/tasks/${task.id}/retry`, {}, "Retrying task")}><RefreshCw size={15} /> Retry</button>}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+
+          <div className="transcript-block">
+            <h3>Live transcript</h3>
+            <div className="transcript-list">
+              {state?.transcript.length === 0 && <span className="muted">Nothing heard yet.</span>}
+              {state?.transcript.slice().reverse().slice(0, 6).map((segment) => (
+                <div key={segment.id}><strong>{segment.speaker_name ?? "Participant"}</strong><p>{segment.text}</p></div>
               ))}
             </div>
+          </div>
+        </aside>
+      </div>
+
+      <details className="system-details">
+        <summary>System details and manual controls</summary>
+        <div className="details-grid">
+          <section>
+            <div className="section-heading"><div><h2>Health</h2><p>Core services required for the rehearsal.</p></div><button onClick={runChecks} disabled={busy !== null}>Run full check</button></div>
+            <div className="check-list">
+              {state?.health.map((item) => <CheckRow key={item.name} ok={item.ok} name={item.name} detail={item.detail} />)}
+              {preflight?.checks.map((item) => <CheckRow key={`preflight-${item.name}`} ok={item.ok} name={item.name} detail={item.detail} />)}
+            </div>
           </section>
-        </div>
-
-        <section className="panel" style={{ marginTop: 14 }}>
-          <h2>Preflight</h2>
-          <div className="health">
-            {preflight?.checks.map((item) => (
-              <div className="health-line" key={item.name}>
-                {item.ok ? <CheckCircle2 className="ok" size={17} /> : <XCircle className="bad" size={17} />}
-                <span><strong>{item.name}</strong> <span className="muted">{item.detail}</span></span>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="panel" style={{ marginTop: 14 }}>
-          <div className="row" style={{ justifyContent: "space-between" }}>
-            <h2>Workspace</h2>
-            <button onClick={reindexWorkspace} title="Reindex workspace"><RefreshCw size={16} />Reindex</button>
-          </div>
-          <div className="muted">{workspace?.root ?? "loading"} · {workspace?.file_count ?? 0} files</div>
-          <div className="list" style={{ marginTop: 10 }}>
-            {workspace?.files.slice(0, 6).map((file) => (
-              <div className="health-line" key={file.id}>
-                <Database size={17} />
-                <span>
-                  <strong>{file.relative_path}</strong>
-                  <span className="muted"> {file.file_type} · {(file.size_bytes / 1024).toFixed(1)} KB</span>
-                </span>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="panel" style={{ marginTop: 14 }}>
-          <h2>Audio Capture</h2>
-          <div className="toolbar">
-            <button onClick={captureSample} title="Capture audio sample"><Mic size={16} />Capture Sample</button>
-            <button className="primary" onClick={() => act("/api/audio/listen/start", {})} title="Start audio listening loop"><Radio size={16} />Start Listening</button>
-            <button onClick={() => act("/api/audio/listen/stop")} title="Stop audio listening loop"><Square size={16} />Stop Listening</button>
-            {captureResult && <span className={captureResult.ok ? "ok" : "bad"}>{captureResult.ok ? `Saved ${captureResult.path}` : captureResult.error}</span>}
-          </div>
-        </section>
-
-        <section className="panel" style={{ marginTop: 14 }}>
-          <div className="row" style={{ justifyContent: "space-between" }}>
-            <h2>Calendar</h2>
-            <div className="toolbar">
-              <span className="pill">Auto: {calendar?.auto_join ? "enabled" : "disabled"}</span>
-              <button onClick={() => act("/api/calendar/auto-join", { enabled: !calendar?.auto_join, interval_seconds: 5 })} title="Toggle calendar auto-join">
-                <CalendarDays size={16} />{calendar?.auto_join ? "Disable" : "Enable"}
+          <section>
+            <h2>Manual request</h2>
+            <p className="muted">Use only to test task handling without speaking in Meet.</p>
+            <textarea value={manualTask} onChange={(event) => setManualTask(event.target.value)} aria-label="Manual task text" />
+            <button className="primary" onClick={() => act("/api/transcript", { speaker_name: "Operator", text: manualTask }, "Sending request")} disabled={busy !== null}>
+              <Mic size={16} /> Send request
+            </button>
+          </section>
+          <section className="audio-checks">
+            <h2>Audio checks</h2>
+            <p className="muted">Run these in Meet before a rehearsal. The voice check briefly unmutes Robin; the hearing check listens to Chrome.</p>
+            <div className="audio-check-actions">
+              <button onClick={() => act("/api/audio/test/output", {}, "Testing Robin's voice")} disabled={busy !== null}>
+                <Volume2 size={16} /> Test Robin voice
+              </button>
+              <button onClick={testAudioInput} disabled={busy !== null || !inMeeting}>
+                <Mic size={16} /> Test hearing (4 sec)
               </button>
             </div>
-          </div>
-          {!calendar?.enabled && <div className="muted">Calendar discovery is disabled.</div>}
-          {calendar?.error && <div className="bad">{calendar.error}</div>}
-          <div className="list">
-            {calendar?.events.map((event) => (
-              <div className="item" key={event.id}>
-                <div className="row">
-                  <CalendarDays size={16} />
-                  <div className="item-title">{event.title}</div>
-                  {event.conflicted && <span className="pill bad">conflict</span>}
-                </div>
-                <div className="muted">{new Date(event.start).toLocaleString()} · {event.meeting_url}</div>
-                <div className="toolbar" style={{ marginTop: 8 }}>
-                  <button className="primary" onClick={() => act(`/api/calendar/events/${event.id}/join`)} title="Join calendar meeting"><Play size={16} />Join</button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="panel" style={{ marginTop: 14 }}>
-          <h2>Observability</h2>
-          <div className="metric-strip">
-            <span className="pill">Events: {metrics?.event_count ?? 0}</span>
-            <span className="pill">Tasks: {metrics?.task_count ?? 0}</span>
-            <span className="pill">Artifacts: {metrics?.artifact_count ?? 0}</span>
-            <span className="pill">Speech: {metrics?.speech_count ?? 0}</span>
-          </div>
-          <div className="list" style={{ marginTop: 10 }}>
-            {events.slice().reverse().slice(0, 6).map((event) => (
-              <div className="health-line" key={event.id ?? `${event.type}-${event.timestamp}`}>
-                <Activity size={17} />
-                <span><strong>{event.type}</strong> <span className="muted">{event.component} · {new Date(event.timestamp).toLocaleTimeString()}</span></span>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <div className="grid">
-          <section className="panel">
-            <h2>Tasks</h2>
-            <div className="list">
-              {state?.tasks.map((task) => {
-                const deck = latestArtifact(state.artifacts, task.id, "deck_json");
-                const pptx = latestArtifact(state.artifacts, task.id, "deck_pptx", deck?.revision);
-                const validation = latestArtifact(state.artifacts, task.id, "validation_json", deck?.revision);
-                return (
-                  <div className="item" key={task.id}>
-                    <div className="row">
-                      <BarChart3 size={16} />
-                      <div className="item-title">{task.title}</div>
-                      <span className="pill">{task.status}</span>
-                      {validation && <span className={task.status === "FAILED" ? "pill bad" : "pill ok"}>validated</span>}
-                    </div>
-                    <div className="muted">Revision {task.revision}{validation ? ` · ${validation.path}` : ""}{task.error ? ` · ${task.error}` : ""}</div>
-                    <div className="toolbar" style={{ marginTop: 8 }}>
-                      {deck?.url && <a href={deck.url} target="_blank"><button title="Open presentation"><MonitorUp size={16} /></button></a>}
-                      {pptx && <a href={`${CORE_URL}/api/artifacts/${pptx.path}`} target="_blank"><button title="Download PPTX">PPTX</button></a>}
-                      {deck && <button onClick={() => act(`/api/tasks/${task.id}/present`)}>Present</button>}
-                      {deck && state.presenting && <button onClick={() => act(`/api/presentations/${task.id}/stop`)}>Stop Presenting</button>}
-                      {["FAILED", "CANCELLED", "COMPLETED"].includes(task.status) && <button onClick={() => act(`/api/tasks/${task.id}/retry`)}><RefreshCw size={16} />Retry</button>}
-                      {activeTasks.some((active) => active.id === task.id) && <button onClick={() => act(`/api/tasks/${task.id}/cancel`)}>Cancel</button>}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-
-          <section className="panel">
-            <h2>Live Transcript</h2>
-            <div className="list">
-              {state?.transcript.slice().reverse().map((segment) => (
-                <div className="item" key={segment.id}>
-                  <div className="item-title">{segment.speaker_name ?? "Participant"}</div>
-                  <div>{segment.text}</div>
-                </div>
-              ))}
-            </div>
+            {audioTestMessage && <p className="audio-test-result" aria-live="polite">{audioTestMessage}</p>}
           </section>
         </div>
-
-        <section className="panel" style={{ marginTop: 14 }}>
-          <h2>Speech</h2>
-          <div className="list">
-            {state?.speech.slice().reverse().slice(0, 5).map((speech) => (
-              <div className="item" key={speech.id}>
-                <div className="item-title">{speech.mode} · {speech.voice} · {speech.format}</div>
-                <div>{speech.text}</div>
-                <div className="muted">{speech.byte_count} bytes{speech.path ? ` · ${speech.path}` : ""}</div>
-              </div>
-            ))}
-          </div>
-        </section>
-      </section>
+      </details>
     </main>
   );
 }
 
-function latestArtifact(artifacts: Artifact[], taskId: string, type: Artifact["type"], revision?: number): Artifact | undefined {
-  const matches = artifacts.filter((artifact) => artifact.task_id === taskId && artifact.type === type && (revision === undefined || artifact.revision === revision));
-  return matches.sort((a, b) => b.revision - a.revision)[0];
+function StatusChip({ ok, label, neutral = false }: { ok: boolean; label: string; neutral?: boolean }) {
+  return <span className={`state-chip ${neutral ? "neutral" : ok ? "ok" : "off"}`}>{ok ? <CheckCircle2 size={14} /> : <span className="mini-dot" />}{label}</span>;
+}
+
+function CheckRow({ ok, name, detail }: { ok: boolean; name: string; detail: string }) {
+  return <div className="check-row">{ok ? <CheckCircle2 className="ok" size={17} /> : <XCircle className="bad" size={17} />}<div><strong>{name.replaceAll("_", " ")}</strong><span>{detail}</span></div></div>;
+}
+
+function describeCurrentAction(state: RuntimeSnapshot | null, taskTitle?: string, taskStatus?: string) {
+  if (!state) return "starting";
+  if (state.meeting_state === "NAVIGATING" || state.meeting_state === "PREJOIN") return "joining the meeting";
+  if (state.meeting_state === "REQUESTING_ADMISSION") return "waiting to be admitted";
+  if (state.meeting_state === "SPEAKING") return "speaking in the meeting";
+  if (state.presenting) return "presenting the finished work";
+  if (taskStatus === "EXECUTING") return `working on ${taskTitle ?? "the request"}`;
+  if (taskStatus === "VALIDATING") return "checking the finished analysis";
+  if (taskStatus === "READY_TO_PRESENT") return "ready to present";
+  if (state.capture_loop_running) return "listening for requests";
+  return "ready for a meeting";
+}
+
+function eventMessage(event: EventEnvelope) {
+  const error = typeof event.payload.error === "string" ? event.payload.error : null;
+  if (error) return error;
+  const messages: Record<string, string> = {
+    "meeting.join.started": "Opening the Meet link",
+    "meeting.joined": "Joined the meeting",
+    "meeting.join.failed": "Could not join the meeting",
+    "meeting.join.duplicate_suppressed": "Ignored a duplicate Join request",
+    "audio.listen.started": "Listening started",
+    "audio.listen.stopped": "Listening stopped",
+    "audio.silence.skipped": "Listening—no speech detected",
+    "audio.listen.iteration_failed": "Audio transcription will retry automatically",
+    "audio.output.test.started": "Testing Robin's voice through BlackHole",
+    "audio.output.test.passed": `Voice test passed (${String(event.payload.duration_seconds ?? "?")} sec of real speech)`,
+    "audio.output.test.failed": "Robin's voice test failed",
+    "audio.input.test.started": "Listening to Chrome for the audio test",
+    "audio.input.test.passed": `Hearing test passed: ${String(event.payload.transcript ?? "speech detected")}`,
+    "audio.input.test.quiet": "Hearing test captured silence from Chrome",
+    "audio.input.test.failed": "Hearing test failed",
+    "transcript.final": `Heard: ${String(event.payload.text ?? "speech")}`,
+    "task.created": "Accepted a new task",
+    "task.started": "Started working",
+    "task.validating": "Validating the result",
+    "task.completed": "Analysis and slides are ready",
+    "task.failed": "Task failed",
+    "artifact.created": `Created ${String(event.payload.type ?? "an artifact").replaceAll("_", " ")}`,
+    "speech.completed": `Said: ${String(event.payload.text ?? "status update")}`,
+    "speech.failed": "Speech failed; work continued",
+    "presentation.started": "Started presenting",
+    "presentation.stopped": "Stopped presenting",
+    "meeting.left": "Left the meeting",
+  };
+  return messages[event.type] ?? event.type.replaceAll(".", " ");
+}
+
+function eventTone(event: EventEnvelope) {
+  if (event.payload.recovered === false || event.type.includes("failed") || event.type.includes("error")) return "error";
+  if (event.type.includes("completed") || event.type === "meeting.joined") return "success";
+  return "active";
+}
+
+function readError(error: unknown) {
+  const raw = error instanceof Error ? error.message : String(error);
+  try {
+    const parsed = JSON.parse(raw) as { detail?: string };
+    return parsed.detail ?? raw;
+  } catch {
+    return raw;
+  }
+}
+
+function latestArtifact(artifacts: Artifact[], taskId: string, type: Artifact["type"]): Artifact | undefined {
+  return artifacts.filter((artifact) => artifact.task_id === taskId && artifact.type === type).sort((a, b) => b.revision - a.revision)[0];
 }

@@ -196,6 +196,18 @@ async def test_playwright_browser_uses_persistent_profile(tmp_path: Path) -> Non
     await browser.close()
 
 
+@pytest.mark.asyncio
+async def test_browser_reuses_named_page_instead_of_opening_duplicate_tabs() -> None:
+    config = BrowserConfig(automation_mode="simulator")
+    browser = BrowserController(config)
+
+    first = await browser.open_page("meet", "https://meet.google.com/abc-defg-hij")
+    second = await browser.open_page("meet", "https://meet.google.com/abc-defg-hij")
+
+    assert second is first
+    assert list(browser.pages) == ["meet"]
+
+
 class FaultySimulatedPageDriver(SimulatedPageDriver):
     def __init__(self, failures: dict[str, int]):
         super().__init__()

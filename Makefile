@@ -1,4 +1,7 @@
-.PHONY: setup launch-chrome seed seed-demo dev doctor preflight core web test smoke smoke-test smoke-audio smoke-bridge smoke-capture smoke-listen smoke-leave-cleanup smoke-meet-fixture smoke-meet-recovery smoke-share-dialog-fixture smoke-calendar smoke-observability smoke-workspace smoke-retry-present smoke-validation smoke-clarification smoke-queue smoke-dedup smoke-real-meet demo-reset typecheck
+.PHONY: robin setup launch-chrome seed seed-demo dev doctor preflight core web test smoke smoke-test smoke-audio smoke-audio-live smoke-bridge smoke-capture smoke-listen smoke-leave-cleanup smoke-meet-fixture smoke-meet-recovery smoke-share-dialog-fixture smoke-calendar smoke-observability smoke-workspace smoke-retry-present smoke-validation smoke-clarification smoke-queue smoke-dedup smoke-real-meet demo-reset typecheck
+
+robin:
+	scripts/run_robin.sh
 
 setup:
 	scripts/setup_partner.sh
@@ -37,6 +40,9 @@ smoke-test: smoke
 smoke-audio:
 	uv run python scripts/smoke_tts.py
 	uv run python scripts/smoke_transcription.py
+
+smoke-audio-live:
+	uv run python scripts/smoke_audio_workflow.py
 
 smoke-bridge:
 	uv run python scripts/smoke_bridge.py

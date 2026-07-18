@@ -73,6 +73,30 @@ async def refresh_audio_bridge() -> RuntimeSnapshot:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/audio/test/output", response_model=RuntimeSnapshot)
+async def test_audio_output() -> RuntimeSnapshot:
+    try:
+        return await runtime.test_audio_output()
+    except Exception as exc:
+        await runtime.emit_event(
+            "audio.output.test.failed", {"error": str(exc)}, component="audio"
+        )
+        await runtime.publish()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/audio/test/input")
+async def test_audio_input() -> dict:
+    try:
+        return await runtime.test_audio_input()
+    except Exception as exc:
+        await runtime.emit_event(
+            "audio.input.test.failed", {"error": str(exc)}, component="audio"
+        )
+        await runtime.publish()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/state", response_model=RuntimeSnapshot)
 async def state() -> RuntimeSnapshot:
     runtime.refresh_health()
@@ -143,7 +167,10 @@ async def events_ws(websocket: WebSocket) -> None:
 @app.post("/api/meeting/join", response_model=RuntimeSnapshot)
 async def join_meeting(request: JoinMeetingRequest) -> RuntimeSnapshot:
     try:
-        return await runtime.join_meeting(request.meeting_url)
+        return await runtime.join_meeting(
+            request.meeting_url,
+            start_listening=request.start_listening,
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

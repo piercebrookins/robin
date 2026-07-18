@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import URLError
@@ -63,6 +64,7 @@ class Supervisor:
             env=env,
             stdout=log,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
         print(f"started {process.name} pid={process.process.pid} log={log_path}")
 
@@ -79,11 +81,21 @@ class Supervisor:
             monitor.cancel()
         for process in self.processes:
             if process.process and process.process.returncode is None:
-                process.process.terminate()
-        await asyncio.gather(
-            *(process.process.wait() for process in self.processes if process.process),
-            return_exceptions=True,
-        )
+                with suppress(ProcessLookupError):
+                    os.killpg(process.process.pid, signal.SIGTERM)
+        waits = [
+            asyncio.create_task(process.process.wait())
+            for process in self.processes
+            if process.process
+        ]
+        if waits:
+            _done, pending = await asyncio.wait(waits, timeout=5)
+            for process in self.processes:
+                if process.process and process.process.returncode is None:
+                    with suppress(ProcessLookupError):
+                        os.killpg(process.process.pid, signal.SIGKILL)
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
         for handle in self._log_handles:
             handle.close()
 
@@ -123,28 +135,44 @@ def _http_ok(url: str) -> bool:
 
 def default_processes(root: Path | None = None) -> list[ManagedProcess]:
     repo = (root or Path.cwd()).resolve()
+    uvicorn = repo / ".venv" / "bin" / "uvicorn"
+    core_command = [
+        str(uvicorn),
+        "robin_core.main:app",
+        "--app-dir",
+        "apps/core",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8787",
+    ]
+    if not uvicorn.is_file():
+        core_command = ["uv", "run", "uvicorn", *core_command[1:]]
+    next_cli = repo / "apps" / "web" / "node_modules" / "next" / "dist" / "bin" / "next"
+    web_command = [
+        "node",
+        str(next_cli),
+        "start",
+        "-H",
+        "127.0.0.1",
+        "-p",
+        "3000",
+    ]
+    web_cwd = repo / "apps" / "web"
+    if os.getenv("ROBIN_WEB_MODE", "development") != "production":
+        web_command = ["pnpm", "--dir", "apps/web", "dev"]
+        web_cwd = repo
     return [
         ManagedProcess(
             name="robin-core",
-            command=[
-                "uv",
-                "run",
-                "uvicorn",
-                "robin_core.main:app",
-                "--app-dir",
-                "apps/core",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                "8787",
-            ],
+            command=core_command,
             cwd=repo,
             health_url="http://127.0.0.1:8787/health",
         ),
         ManagedProcess(
             name="robin-web",
-            command=["pnpm", "--dir", "apps/web", "dev"],
-            cwd=repo,
+            command=web_command,
+            cwd=web_cwd,
             health_url="http://127.0.0.1:3000",
         ),
     ]

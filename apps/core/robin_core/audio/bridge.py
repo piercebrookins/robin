@@ -16,6 +16,15 @@ class AudioBridge:
         self.config = config or AudioConfig()
         self.output_dir = output_dir
         self.openai_api_key = openai_api_key
+        self.openai_client = (
+            AsyncOpenAI(
+                api_key=openai_api_key,
+                timeout=self.config.openai_timeout_seconds,
+                max_retries=self.config.openai_max_retries,
+            )
+            if openai_api_key
+            else None
+        )
         self.bridge_client = bridge_client or create_bridge_client(self.config)
         self.capture_healthy = True
         self.virtual_mic_healthy = True
@@ -37,7 +46,14 @@ class AudioBridge:
             else:
                 self._synthesize_simulator(record)
             if record.path and self.output_dir:
-                await self.bridge_client.play_audio(self.output_dir / record.path)
+                path = self.output_dir / record.path
+                record.duration_seconds = self._wav_duration(path)
+                playback = await self.bridge_client.play_audio(path)
+                played = playback.result.get("played", False)
+                if not playback.ok or str(played).lower() not in {"true", "1"}:
+                    raise RuntimeError(playback.error or "Audio playback did not start.")
+                record.playback_device = str(playback.result.get("output_device", "")) or None
+                record.playback_route = str(playback.result.get("route", "")) or None
             record.completed_at = now_utc()
         except Exception as exc:
             record.error = str(exc)
@@ -82,8 +98,9 @@ class AudioBridge:
         if not self.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required for audio.mode=openai.")
         path = self._speech_path(record)
-        client = AsyncOpenAI(api_key=self.openai_api_key)
-        response = await client.audio.speech.create(
+        if self.openai_client is None:
+            raise ValueError("OPENAI_API_KEY is required for audio.mode=openai.")
+        response = await self.openai_client.audio.speech.create(
             model=self.config.speech_model,
             voice=self.config.speech_voice,
             input=record.text,
@@ -97,9 +114,10 @@ class AudioBridge:
     async def _transcribe_openai(self, path: Path) -> str:
         if not self.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required for audio.mode=openai.")
-        client = AsyncOpenAI(api_key=self.openai_api_key)
+        if self.openai_client is None:
+            raise ValueError("OPENAI_API_KEY is required for audio.mode=openai.")
         with path.open("rb") as audio_file:
-            response = await client.audio.transcriptions.create(
+            response = await self.openai_client.audio.transcriptions.create(
                 model=self.config.transcription_model,
                 file=audio_file,
                 response_format="json",
@@ -122,6 +140,29 @@ class AudioBridge:
             for index in range(frames):
                 value = int(9000 * math.sin(2 * math.pi * 440 * (index / sample_rate)))
                 wav.writeframesraw(value.to_bytes(2, "little", signed=True))
+
+    @staticmethod
+    def _wav_duration(path: Path) -> float | None:
+        if path.suffix.lower() != ".wav":
+            return None
+        try:
+            with wave.open(str(path), "rb") as wav:
+                if wav.getframerate() <= 0 or wav.getnframes() <= 0:
+                    raise ValueError("Synthesized WAV contains no audio frames.")
+                frame_count = wav.getnframes()
+                bytes_per_frame = wav.getnchannels() * wav.getsampwidth()
+                # Streaming WAV responses may leave RIFF/data sizes at 0xFFFFFFFF.
+                # Derive the real frame count from the bytes after the data header.
+                header = path.read_bytes()[:4096]
+                data_marker = header.find(b"data")
+                if data_marker >= 0 and bytes_per_frame > 0:
+                    actual_frames = (path.stat().st_size - data_marker - 8) // bytes_per_frame
+                    frame_count = min(frame_count, actual_frames)
+                if frame_count <= 0:
+                    raise ValueError("Synthesized WAV contains no PCM payload.")
+                return frame_count / wav.getframerate()
+        except wave.Error as exc:
+            raise ValueError(f"Synthesized WAV is invalid: {exc}") from exc
 
 
 async def _read_binary_response(response) -> bytes:

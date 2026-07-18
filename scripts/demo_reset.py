@@ -26,11 +26,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Reset Robin to a clean demo workspace.")
     parser.add_argument("--start", action="store_true", help="Start the Robin supervisor after reset.")
     parser.add_argument("--skip-stop", action="store_true", help="Do not stop services on Robin ports.")
+    parser.add_argument("--stop-only", action="store_true", help="Stop Robin services without resetting state.")
     parser.add_argument("--archive-root", default=str(ROOT / "archive"))
     args = parser.parse_args()
 
     if not args.skip_stop:
         stop_robin_processes()
+    if args.stop_only:
+        print("Robin services stopped; workspace state was preserved.")
+        return
     archive_path = archive_demo_state(Path(args.archive_root))
     seed_demo_workspace()
     if args.start:
@@ -42,7 +46,9 @@ def main() -> None:
 
 def stop_robin_processes() -> None:
     pids = robin_port_pids()
-    candidates = set(pids)
+    candidates = set(pids) | known_robin_pids()
+    protected = {os.getpid()} | ancestor_pids(os.getpid())
+    candidates.difference_update(protected)
     for pid in pids:
         candidates.update(ancestor_pids(pid))
     targets = sorted(pid for pid in candidates if is_robin_process(pid))
@@ -57,6 +63,22 @@ def stop_robin_processes() -> None:
     for pid in targets:
         if process_exists(pid):
             kill(pid)
+
+
+def known_robin_pids() -> set[int]:
+    result = subprocess.run(
+        ["ps", "-ax", "-o", "pid=,command="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    pids: set[int] = set()
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        pid_text, _, command = stripped.partition(" ")
+        if pid_text.isdigit() and is_robin_command(command):
+            pids.add(int(pid_text))
+    return pids
 
 
 def robin_port_pids() -> set[int]:
@@ -97,11 +119,17 @@ def ancestor_pids(pid: int) -> set[int]:
 def is_robin_process(pid: int) -> bool:
     result = subprocess.run(["ps", "-p", str(pid), "-o", "command="], check=False, capture_output=True, text=True)
     command = result.stdout
+    return is_robin_command(command)
+
+
+def is_robin_command(command: str) -> bool:
     markers = [
         "scripts/robin.py dev",
-        "robin_core.main:app",
+        "robin_core.main:app --app-dir apps/core",
         "apps/web dev",
-        "next dev",
+        "apps/web start",
+        "next dev -H 127.0.0.1 -p 3000",
+        "next start -H 127.0.0.1 -p 3000",
     ]
     return any(marker in command for marker in markers)
 

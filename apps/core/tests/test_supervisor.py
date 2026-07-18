@@ -50,3 +50,24 @@ def test_default_processes_describe_core_and_web() -> None:
     assert [process.name for process in processes] == ["robin-core", "robin-web"]
     assert processes[0].health_url == "http://127.0.0.1:8787/health"
     assert processes[1].health_url == "http://127.0.0.1:3000"
+
+
+def test_default_processes_use_production_web_runtime_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ROBIN_WEB_MODE", "production")
+
+    processes = default_processes(Path("/tmp/robin"))
+
+    assert processes[1].command == [
+        "node",
+        str(
+            Path("/tmp/robin").resolve()
+            / "apps/web/node_modules/next/dist/bin/next"
+        ),
+        "start",
+        "-H",
+        "127.0.0.1",
+        "-p",
+        "3000",
+    ]

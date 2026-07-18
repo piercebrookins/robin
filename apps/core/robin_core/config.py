@@ -60,6 +60,9 @@ class AudioConfig(BaseModel):
     capture_bundle_id: str = "com.google.Chrome"
     capture_sample_duration_ms: int = 1500
     capture_loop_interval_ms: int = 500
+    silence_rms_threshold: float = 0.002
+    openai_timeout_seconds: float = 20.0
+    openai_max_retries: int = 1
     speech_model: str = "gpt-4o-mini-tts"
     transcription_model: str = "gpt-4o-mini-transcribe"
     speech_voice: str = "alloy"
