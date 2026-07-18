@@ -51,13 +51,15 @@ class BrowserController:
             self._playwright = await async_playwright().start()
         if self._context is None:
             self.config.profile_dir.mkdir(parents=True, exist_ok=True)
+            args = [
+                f"--remote-debugging-port={self.config.remote_debugging_port}",
+                "--autoplay-policy=no-user-gesture-required",
+            ]
+            if self.config.use_fake_media_ui:
+                args.append("--use-fake-ui-for-media-stream")
             launch_kwargs: dict[str, object] = {
                 "headless": self.config.headless,
-                "args": [
-                    f"--remote-debugging-port={self.config.remote_debugging_port}",
-                    "--use-fake-ui-for-media-stream",
-                    "--autoplay-policy=no-user-gesture-required",
-                ],
+                "args": args,
             }
             if self.config.executable_path:
                 launch_kwargs["executable_path"] = str(self.config.executable_path)

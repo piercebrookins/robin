@@ -36,12 +36,19 @@ class BrowserConfig(BaseModel):
     profile_dir: Path = Path("~/Library/Application Support/Robin/Chrome")
     recovery_screenshot_dir: Path = Path("./RobinWorkspace/sessions/browser-recovery")
     headless: bool = False
+    use_fake_media_ui: bool = True
     remote_debugging_port: int = 9222
     navigation_timeout_ms: int = 30_000
     prejoin_timeout_ms: int = 20_000
     admission_timeout_ms: int = 120_000
     ui_action_retries: int = 1
     ui_recovery_pause_ms: int = 250
+    share_dialog_mode: str = "simulator"
+    share_source_title: str = "Robin Presentation"
+    share_dialog_timeout_ms: int = 10_000
+    share_dialog_retries: int = 1
+    share_dialog_poll_interval_ms: int = 250
+    computer_use_command: str = "cua-driver"
 
 
 class AudioConfig(BaseModel):
@@ -57,7 +64,9 @@ class AudioConfig(BaseModel):
     speech_format: str = "wav"
     output_device_name: str = "BlackHole 2ch"
     post_speech_cooldown_ms: int = 700
-    simulator_transcript: str = "Robin, use the finance files to compare the quarterly results and make slides."
+    simulator_transcript: str = (
+        "Robin, use the finance files to compare the quarterly results and make slides."
+    )
 
 
 class WorkspaceConfig(BaseModel):
@@ -111,7 +120,9 @@ def load_settings() -> Settings:
     settings.workspace.root = settings.workspace.root.expanduser().resolve()
     settings.database.path = settings.database.path.expanduser().resolve()
     settings.browser.profile_dir = settings.browser.profile_dir.expanduser()
-    settings.browser.recovery_screenshot_dir = settings.browser.recovery_screenshot_dir.expanduser().resolve()
+    settings.browser.recovery_screenshot_dir = (
+        settings.browser.recovery_screenshot_dir.expanduser().resolve()
+    )
     if settings.browser.executable_path:
         settings.browser.executable_path = settings.browser.executable_path.expanduser()
     if settings.audio.bridge_executable:

@@ -48,6 +48,7 @@ make smoke-listen
 make smoke-leave-cleanup
 make smoke-meet-fixture
 make smoke-meet-recovery
+make smoke-share-dialog-fixture
 make smoke-calendar
 make smoke-observability
 make smoke-workspace
@@ -94,6 +95,10 @@ uv run python scripts/smoke_capture.py --bundle-id com.apple.Safari
 - Google Meet browser adapter and audio bridge contracts with simulator-safe implementations.
 - Playwright Meet-control smoke against a local fixture using a persistent Chrome profile.
 - Bounded Meet UI recovery that refocuses the Meet tab, retries transient click failures, and captures diagnostic screenshots.
+- Hybrid presentation automation: Playwright handles Meet DOM controls, while Codex/macOS Computer Use is restricted to Chrome's native share picker.
+- Before sharing, Robin waits for the presentation readiness marker, verifies the expected task and revision, rejects renderer errors, and saves a presentation evidence screenshot.
+- Native picker automation pins actions to Robin Chrome's loopback debugging PID, selects the uniquely titled `Robin Presentation` tab, verifies the picker closes, and persists screenshots plus a JSONL action trace.
+- `make smoke-share-dialog-fixture` runs a localhost hybrid rehearsal: Playwright drives fake Meet DOM controls, the real Chrome picker opens through `getDisplayMedia()`, and Codex Computer Use completes and verifies the native dialog without contacting Google Meet.
 - OpenAI-backed intent classification when `OPENAI_API_KEY` is available, with a local classifier fallback for offline tests.
 - OpenAI-backed TTS and audio-file transcription smokes, with simulator mode for repeatable local tests.
 - Basic speech floor manager that waits for a configurable silence window before Robin speaks, while ignoring Robin echo transcripts.
@@ -123,7 +128,7 @@ Native ScreenCaptureKit audio routing and real Google Meet screen-share picker c
 
 The dashboard Audio Capture panel can capture a one-off sample or start/stop Robin's listening loop. In simulator mode, the loop uses the configured simulator transcript; in process bridge mode, it captures from the configured app bundle before transcription.
 
-For real Google Meet control, set `browser.automation_mode` to `playwright`, point `browser.executable_path` at Google Chrome, and use Robin's persistent `browser.profile_dir` for the pre-provisioned Google account.
+For real Google Meet control, set `browser.automation_mode` to `playwright`, set `browser.share_dialog_mode` to `cua_driver`, point `browser.executable_path` at Google Chrome, and use Robin's persistent `browser.profile_dir` for the pre-provisioned Google account. `cua-driver` must be on `PATH`, and CuaDriver.app needs Accessibility and Screen Recording permission. Computer Use is not used for ordinary Meet controls or credentials; it is bounded to Chrome-owned dialogs that Playwright cannot access.
 Then run `ROBIN_REAL_MEET_URL=... make smoke-real-meet` to join, generate a validated deck, present it, stop sharing, and leave.
 
 Calendar discovery is available through the local provider:

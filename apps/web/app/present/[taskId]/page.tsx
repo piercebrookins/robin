@@ -11,6 +11,7 @@ export default function Presentation({ params, searchParams }: { params: Promise
   const [deck, setDeck] = useState<DeckSpec | null>(null);
   const [chart, setChart] = useState<ChartSpec | null>(null);
   const [index, setIndex] = useState(0);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([params, searchParams]).then(([{ taskId }, query]) => {
@@ -22,6 +23,9 @@ export default function Presentation({ params, searchParams }: { params: Promise
       setDeck(deck);
       setChart(chart);
       setIndex(session.active_slide);
+      setError(null);
+    }).catch((reason: unknown) => {
+      setError(reason instanceof Error ? reason.message : "Unable to load Robin presentation");
     });
   }, [params, searchParams]);
 
@@ -60,7 +64,8 @@ export default function Presentation({ params, searchParams }: { params: Promise
 
   return (
     <main className="presentation" onClick={() => taskId && navigatePresentation(taskId, "next").then((session) => setIndex(session.active_slide)).catch(() => undefined)}>
-      <section className="slide" data-robin-presentation-ready={slide ? "true" : "false"} data-robin-task-id={taskId ?? ""} data-robin-revision={deck?.revision ?? ""}>
+      <section className="slide" data-robin-presentation-ready={slide && !error ? "true" : "false"} data-robin-task-id={taskId ?? ""} data-robin-revision={deck?.revision ?? ""}>
+        {error && <div role="alert" data-robin-presentation-error="true">{error}</div>}
         {!slide && <h1>Loading Robin presentation</h1>}
         {slide?.type === "title" && (
           <div>

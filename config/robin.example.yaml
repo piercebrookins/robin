@@ -42,12 +42,20 @@ browser:
   profile_dir: "~/Library/Application Support/Robin/Chrome"
   recovery_screenshot_dir: "./RobinWorkspace/sessions/browser-recovery"
   headless: false
+  use_fake_media_ui: true
   remote_debugging_port: 9222
   navigation_timeout_ms: 30000
   prejoin_timeout_ms: 20000
   admission_timeout_ms: 120000
   ui_action_retries: 1
   ui_recovery_pause_ms: 250
+  # Real Meet mode uses Codex/macOS Computer Use only for Chrome-owned dialogs.
+  share_dialog_mode: "simulator"
+  share_source_title: "Robin Presentation"
+  share_dialog_timeout_ms: 10000
+  share_dialog_retries: 1
+  share_dialog_poll_interval_ms: 250
+  computer_use_command: "cua-driver"
 
 workspace:
   root: "./RobinWorkspace"
