@@ -12,6 +12,12 @@ class SelectorCandidate:
 
 
 MEET_SELECTORS: dict[str, list[SelectorCandidate]] = {
+    "prejoin_mute_button": [
+        SelectorCandidate(role="button", name_regex=r"Turn off microphone|Mute microphone"),
+    ],
+    "prejoin_camera_button": [
+        SelectorCandidate(role="button", name_regex=r"Turn off camera"),
+    ],
     "join_button": [
         SelectorCandidate(role="button", name_regex=r"Join now|Ask to join"),
         SelectorCandidate(test_id="join-button"),

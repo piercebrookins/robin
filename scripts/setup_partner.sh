@@ -181,6 +181,7 @@ replacements = {
     'bridge_mode: "simulator"': 'bridge_mode: "process"',
     'bridge_executable: null': 'bridge_executable: "./apps/macos-bridge/.build/debug/robin-macos-bridge"',
     'automation_mode: "simulator"': 'automation_mode: "playwright"',
+    'connection_mode: "launch"': 'connection_mode: "cdp"',
     'executable_path: null': 'executable_path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"',
     'share_dialog_mode: "simulator"': 'share_dialog_mode: "cua_driver"',
 }
@@ -206,11 +207,13 @@ real_meet_prereq_notes() {
   fi
   cat <<'EOF'
 Before real Meet smoke:
-1. Open Chrome and sign in with Robin's dedicated Google account.
-2. Grant Screen Recording and Accessibility to the terminal/app running Robin.
-3. In Google Meet settings, choose BlackHole 2ch as Robin's microphone.
-4. Confirm CuaDriver.app has Accessibility and Screen Recording permission.
-5. Have a second participant join the same Meet to verify Robin can be heard.
+1. Run `make launch-chrome`.
+2. Sign into Robin's dedicated Google account in that dedicated Chrome window.
+3. Leave that Chrome window open while running Robin.
+4. Grant Screen Recording and Accessibility to the terminal/app running Robin.
+5. In Google Meet settings, choose BlackHole 2ch as Robin's microphone.
+6. Confirm CuaDriver.app has Accessibility and Screen Recording permission.
+7. Have a second participant join the same Meet to verify Robin can be heard.
 EOF
 }
 
@@ -270,6 +273,7 @@ Useful next commands:
   make preflight
   make smoke-test
   ROBIN_REAL_MEET_URL=https://meet.google.com/... make smoke-real-meet
+  make launch-chrome
 
 Logs are under:
   RobinWorkspace/sessions/logs/

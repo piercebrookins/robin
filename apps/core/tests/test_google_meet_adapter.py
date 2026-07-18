@@ -27,6 +27,8 @@ async def test_google_meet_simulator_join_flow_clicks_prejoin_controls() -> None
     assert adapter.camera_enabled is False
     assert adapter.meet_page is not None
     assert "join_button" in adapter.meet_page.clicked
+    assert "prejoin_mute_button" in adapter.meet_page.clicked
+    assert "prejoin_camera_button" in adapter.meet_page.clicked
 
 
 @pytest.mark.asyncio

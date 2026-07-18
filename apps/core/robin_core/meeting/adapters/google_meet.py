@@ -59,8 +59,27 @@ class GoogleMeetAdapter:
     async def enter_prejoin(self) -> None:
         page = self._page()
         if not await page.is_visible(MEET_SELECTORS["join_button"], self.config.prejoin_timeout_ms):
+            screenshot_path = await self._capture_recovery_screenshot("prejoin_controls", 1, page)
+            self._record_recovery(
+                "prejoin_controls",
+                1,
+                recovered=False,
+                error="Google Meet prejoin controls did not appear.",
+                page=page,
+                screenshot_path=screenshot_path,
+            )
             raise TimeoutError("Google Meet prejoin controls did not appear.")
+        await self._turn_off_prejoin_media()
         self.state = MeetingState.PREJOIN
+
+    async def _turn_off_prejoin_media(self) -> None:
+        page = self._page()
+        if await page.is_visible(MEET_SELECTORS["prejoin_mute_button"], 1_000):
+            await self._click_with_recovery("prejoin_mute_button", MEET_SELECTORS["prejoin_mute_button"], 3_000)
+        if await page.is_visible(MEET_SELECTORS["prejoin_camera_button"], 1_000):
+            await self._click_with_recovery("prejoin_camera_button", MEET_SELECTORS["prejoin_camera_button"], 3_000)
+        self.muted = True
+        self.camera_enabled = False
 
     async def join(self) -> None:
         if not self.current_url:

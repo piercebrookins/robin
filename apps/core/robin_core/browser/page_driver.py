@@ -42,7 +42,7 @@ class PageDriver(Protocol):
 class SimulatedPageDriver:
     url: str = "about:blank"
     visible_keys: set[str] = field(
-        default_factory=lambda: {"join_button", "mute_button", "camera_button"}
+        default_factory=lambda: {"join_button", "mute_button", "camera_button", "prejoin_mute_button", "prejoin_camera_button"}
     )
     clicked: list[str] = field(default_factory=list)
     presentation_error: str | None = None
@@ -58,6 +58,8 @@ class SimulatedPageDriver:
         if key == "join_button":
             self.visible_keys.add("joined_signal")
             self.visible_keys.add("leave_button")
+        if key in {"prejoin_mute_button", "prejoin_camera_button"}:
+            self.visible_keys.discard(key)
         if key == "present_button":
             self.visible_keys.add("share_tab_option")
         if key == "share_tab_option":
@@ -107,6 +109,8 @@ class SimulatedPageDriver:
 
     def _key_for(self, candidates: list[SelectorCandidate]) -> str:
         for key, known in {
+            "prejoin_mute_button": "Turn off microphone|Mute microphone",
+            "prejoin_camera_button": "Turn off camera",
             "join_button": "Join now|Ask to join",
             "leave_button": "Leave call|Leave meeting",
             "mute_button": "Turn off microphone|Mute microphone|Microphone",
@@ -165,8 +169,9 @@ class PlaywrightPageDriver:
     async def is_visible(self, candidates: list[SelectorCandidate], timeout_ms: int) -> bool:
         for candidate in candidates:
             try:
-                if await self._locator(candidate).first.is_visible(timeout=timeout_ms):
-                    return True
+                locator = self._locator(candidate).first
+                await locator.wait_for(state="visible", timeout=timeout_ms)
+                return True
             except Exception:
                 continue
         return False

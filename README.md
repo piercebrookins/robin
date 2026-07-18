@@ -25,7 +25,10 @@ For a provisioned Mac that is ready to exercise real Google Meet, Chrome, BlackH
 
 ```bash
 scripts/setup_partner.sh --real-meet
+make launch-chrome
 ```
+
+Chrome 136+ blocks remote debugging against the normal/default Chrome profile. `make launch-chrome` opens Robin's dedicated non-default Chrome profile with remote debugging enabled. Sign into Robin's Google account in that window once, leave it open, then run real Meet smoke tests.
 
 ## Useful Commands
 
@@ -33,6 +36,7 @@ scripts/setup_partner.sh --real-meet
 make seed
 make seed-demo
 make setup
+make launch-chrome
 make dev
 make doctor
 make preflight
@@ -128,7 +132,7 @@ Native ScreenCaptureKit audio routing and real Google Meet screen-share picker c
 
 The dashboard Audio Capture panel can capture a one-off sample or start/stop Robin's listening loop. In simulator mode, the loop uses the configured simulator transcript; in process bridge mode, it captures from the configured app bundle before transcription.
 
-For real Google Meet control, set `browser.automation_mode` to `playwright`, set `browser.share_dialog_mode` to `cua_driver`, point `browser.executable_path` at Google Chrome, and use Robin's persistent `browser.profile_dir` for the pre-provisioned Google account. `cua-driver` must be on `PATH`, and CuaDriver.app needs Accessibility and Screen Recording permission. Computer Use is not used for ordinary Meet controls or credentials; it is bounded to Chrome-owned dialogs that Playwright cannot access.
+For real Google Meet control, set `browser.automation_mode` to `playwright`, `browser.connection_mode` to `cdp`, and `browser.share_dialog_mode` to `cua_driver`. Point `browser.executable_path` at Google Chrome, then run `make launch-chrome` and sign in with Robin's pre-provisioned Google account in that dedicated profile. `cua-driver` must be on `PATH`, and CuaDriver.app needs Accessibility and Screen Recording permission. Computer Use is not used for ordinary Meet controls or credentials; it is bounded to Chrome-owned dialogs that Playwright cannot access.
 Then run `ROBIN_REAL_MEET_URL=... make smoke-real-meet` to join, generate a validated deck, present it, stop sharing, and leave.
 
 Calendar discovery is available through the local provider:
