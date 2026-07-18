@@ -1,0 +1,32 @@
+[project]
+name = "robin-agent"
+version = "0.1.0"
+description = "Mac-hosted AI coworker MVP"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.121.0",
+  "uvicorn[standard]>=0.38.0",
+  "pydantic>=2.12.0",
+  "pydantic-settings>=2.11.0",
+  "python-dotenv>=1.2.0",
+  "pyyaml>=6.0.0",
+  "openai>=2.8.0",
+  "pandas>=2.3.0",
+  "openpyxl>=3.1.0",
+  "pymupdf>=1.26.0",
+  "plotly>=6.5.0",
+  "kaleido>=1.2.0",
+  "playwright>=1.56.0",
+  "httpx>=0.28.0",
+  "pytest>=9.0.0",
+  "pytest-asyncio>=1.3.0",
+  "python-pptx>=1.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["apps/core/tests"]
+pythonpath = ["apps/core"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100

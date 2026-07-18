@@ -1,7 +1,0 @@
-brew "node@24"
-brew "coreutils"
-brew "jq"
-brew "switchaudio-osx"
-cask "zoom"
-cask "blackhole-2ch"
-cask "blackhole-16ch"

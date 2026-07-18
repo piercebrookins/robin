@@ -1,43 +1,162 @@
-# Robin
+# Robin Agent
 
-Robin is a Mac-hosted agentic coworker that joins ordinary Zoom meetings through the signed-in Zoom Workplace app. It uses OpenAI Realtime for interruptible speech and GPT-5.6 computer use to operate the whole dedicated Mac. There is no Zoom SDK and no private Zoom API.
+Robin is a Mac-hosted AI coworker prototype for joining Google Meet, listening for delegated work, generating analysis artifacts from a controlled workspace, and presenting results back to the meeting.
 
-The repository contains a TypeScript daemon and private control panel, a native Swift ScreenCaptureKit/Accessibility/Core Audio helper, safety and approval policy, redacted audit traces, persistent launch services, clean-machine setup, and a deterministic fake-Zoom simulator.
+This repository implements the hackathon MVP described in `Robin_PRD.md` and `Robin_TDD.md`.
 
-## Try the simulator
-
-Requirements: Node 22 or newer.
+## Quick Start
 
 ```bash
-npm ci
-npm test
-npm run simulator
+scripts/setup_partner.sh
 ```
 
-Open `http://127.0.0.1:3939`. Join `https://zoom.us/j/123456789`; the recorded scenario moves through joining and waiting-room admission automatically, after which you can assign a local task. The simulator never needs a Zoom or OpenAI account.
+Open:
 
-The simulator replays committed mono PCM16 speech recordings, including a barge-in turn, and returns rendered 1280×720 fake-Zoom frames for joining, waiting-room, in-meeting, and sharing states.
+- Dashboard: http://127.0.0.1:3000
+- Core API: http://127.0.0.1:8787/docs
 
-## Deploy on a dedicated Mac
-
-Robin supports a dedicated Apple-silicon Mac running macOS 14 or newer with a persistent graphical login session. The tested development host is recorded by `npm run doctor`.
+For a faster install without tests or startup:
 
 ```bash
-./scripts/bootstrap-macos.sh
-./scripts/keychain-secret.sh set OPENAI_API_KEY
-./scripts/keychain-secret.sh generate ROBIN_PANEL_TOKEN
-./scripts/install-launchd.sh
-./scripts/doctor.sh
+scripts/setup_partner.sh --skip-tests --no-start
 ```
 
-Bootstrap deliberately does not start persistent services. If BlackHole has just been installed it exits with a reboot instruction; rerun it after reboot. Complete the permission and Zoom-login steps in [Deployment](docs/DEPLOY.md) before installing the services. Do not use a personal everyday desktop: Robin’s isolation and sharing guarantees assume a dedicated OS user and display.
+For a provisioned Mac that is ready to exercise real Google Meet, Chrome, BlackHole, and the native bridge:
 
-## Commands
+```bash
+scripts/setup_partner.sh --real-meet
+make launch-chrome
+```
 
-- `npm run simulator` — fake Zoom, recorded audio metadata, and deterministic desktop actions.
-- `npm test` — policy, audio, lifecycle, stop, redaction, and control API tests.
-- `npm run check` — type-check and test.
-- `npm run mac-helper:build` — release-build the native helper.
-- `npm run doctor` — readiness checks without printing secret values.
+Chrome 136+ blocks remote debugging against the normal/default Chrome profile. `make launch-chrome` opens Robin's dedicated non-default Chrome profile with remote debugging enabled. Sign into Robin's Google account in that window once, leave it open, then run real Meet smoke tests.
 
-See [Architecture](ARCHITECTURE.md), [Security](docs/SECURITY.md), [Demo](docs/DEMO.md), and [Troubleshooting](docs/TROUBLESHOOTING.md).
+## Useful Commands
+
+```bash
+make seed
+make seed-demo
+make setup
+make launch-chrome
+make dev
+make doctor
+make preflight
+make test
+make core
+make web
+make smoke
+make smoke-test
+make smoke-audio
+make smoke-bridge
+make smoke-capture
+make smoke-listen
+make smoke-leave-cleanup
+make smoke-meet-fixture
+make smoke-meet-recovery
+make smoke-calendar
+make smoke-observability
+make smoke-workspace
+make smoke-retry-present
+make smoke-validation
+make smoke-clarification
+make smoke-queue
+make smoke-dedup
+make demo-reset
+ROBIN_REAL_MEET_URL=https://meet.google.com/... make smoke-real-meet
+```
+
+`make smoke-capture` targets `com.google.Chrome` by default. On a machine where Chrome is not visible to ScreenCaptureKit, use:
+
+```bash
+uv run python scripts/smoke_capture.py --bundle-id com.apple.Safari
+```
+
+`make preflight` checks demo readiness: API keys, workspace data, database writes, free disk, internet access, dashboard reachability, presentation URL configuration, browser mode, audio bridge mode, and BlackHole requirements. Simulator mode reports real Google login, Chrome UI control, and macOS capture permissions as not required; switch `browser.automation_mode` and `audio.bridge_mode` in `config/robin.example.yaml` to exercise real-machine prerequisites.
+
+## Current MVP Scope
+
+- Local FastAPI control plane with persisted runtime, meeting, transcript, task, artifact, and health state.
+- Demo-readiness preflight covering workspace files, database writes, disk headroom, internet, dashboard, renderer, browser, audio, and simulator-vs-real prerequisites.
+- Supervisor command that starts core and web, waits for health checks, writes logs, and restarts crashed child processes.
+- Workspace boundary enforcement for CSV, XLSX, and PDF files.
+- Deterministic business-analysis worker that creates chart JSON/PNG, a browser-renderable deck JSON, and a downloadable PPTX export.
+- PDF context extraction for supporting narrative, citations, and validation source lineage while structured CSV/XLSX remains the numeric source of truth.
+- Persisted validation reports for finance analysis, with runtime gating before a deck can become ready to present.
+- Revisioned chart, deck, and validation artifacts so spoken follow-ups preserve prior outputs while the presentation route serves the latest successful revision.
+- Dashboard with meeting controls, health, transcript, task queue, artifacts, and emergency stop.
+- Calendar discovery panel for configured local `.ics` or JSON events with Google Meet links.
+- Calendar auto-join toggle and runtime poller that joins non-conflicted events inside the configured early window and leaves when the event ends.
+- Workspace reindex and file-inspection API/dashboard panel for approved CSV, XLSX, and PDF source files.
+- Structured event envelopes, metrics endpoint, event WebSocket, and JSONL traces for meeting/task/presentation activity.
+- Demo reset command that archives generated/session state, reseeds fixtures, and restarts the local supervisor.
+- Task retry and presentation stop controls for operator recovery during demos.
+- Spoken task-failure blocker announcements before Robin returns to listening.
+- Clarification flow for ambiguous implied requests with visible awaiting-clarification task state before Robin starts work.
+- Deck-based presentation narration that advances through slides, speaks key findings, and stops presenting when complete.
+- Explicit queued task state when concurrency slots are exhausted, including queued-task cancellation.
+- Duplicate task suppression for repeated direct requests and transcript commands while work is active.
+- Presentation renderer at `/present/[taskId]`.
+- Google Meet browser adapter and audio bridge contracts with simulator-safe implementations.
+- Playwright Meet-control smoke against a local fixture using a persistent Chrome profile.
+- Bounded Meet UI recovery that refocuses the Meet tab, retries transient click failures, and captures diagnostic screenshots.
+- OpenAI-backed intent classification when `OPENAI_API_KEY` is available, with a local classifier fallback for offline tests.
+- OpenAI-backed TTS and audio-file transcription smokes, with simulator mode for repeatable local tests.
+- Basic speech floor manager that waits for a configurable silence window before Robin speaks, while ignoring Robin echo transcripts.
+- Swift macOS bridge JSON command contract with Python process client and simulator client.
+- Native bridge permission checks for Screen Recording, Accessibility, microphone, and BlackHole.
+- Native bridge WAV playback routed to a matching BlackHole audio device when available.
+- Native bridge ScreenCaptureKit app listing and bounded Chrome audio sample capture command.
+- Bounded audio listening loop that captures, transcribes, deduplicates, and ingests meeting audio as transcript segments.
+- Meeting leave cleanup that stops the listening loop and presentation state before returning Robin to ready.
+
+## Native Bridge Mode
+
+```bash
+swift build --package-path apps/macos-bridge
+make smoke-bridge
+```
+
+To use the process bridge from `robin-core`, set:
+
+```yaml
+audio:
+  bridge_mode: "process"
+  bridge_executable: "./apps/macos-bridge/.build/debug/robin-macos-bridge"
+```
+
+Native ScreenCaptureKit audio routing and real Google Meet screen-share picker control are represented behind adapter interfaces so the app can run and test on a development machine before Mac provisioning is complete.
+
+The dashboard Audio Capture panel can capture a one-off sample or start/stop Robin's listening loop. In simulator mode, the loop uses the configured simulator transcript; in process bridge mode, it captures from the configured app bundle before transcription.
+
+For real Google Meet control, set `browser.automation_mode` to `playwright`, `browser.connection_mode` to `cdp`, point `browser.executable_path` at Google Chrome, and use Robin's persistent `browser.profile_dir` for the pre-provisioned Google account.
+Then run `ROBIN_REAL_MEET_URL=... make smoke-real-meet` to join, generate a validated deck, present it, stop sharing, and leave.
+
+Calendar discovery is available through the local provider:
+
+```yaml
+calendar:
+  enabled: true
+  provider: "local"
+  file_path: "./RobinWorkspace/source-data/calendar_demo.ics"
+  auto_join: true
+  join_early_seconds: 60
+```
+
+## Supervisor Logs
+
+`make dev` writes child-process logs under `RobinWorkspace/sessions/logs/` and stops both services cleanly when interrupted.
+
+Runtime traces are written as JSONL under `RobinWorkspace/sessions/traces/`. Recent events and aggregate counters are available from `/api/events`, `/api/metrics`, and `/ws/events`.
+
+## LaunchAgent
+
+On a pre-provisioned Mac, install Robin as a user LaunchAgent with:
+
+```bash
+scripts/install_launch_agent.sh
+```
+
+Remove it with:
+
+```bash
+scripts/install_launch_agent.sh uninstall
+```

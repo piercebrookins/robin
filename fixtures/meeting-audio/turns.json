@@ -1,9 +1,0 @@
-{
-  "format": { "encoding": "pcm16", "sampleRate": 24000, "channels": 1 },
-  "description": "Deterministic PCM16 WAV recordings used to test participant speech, Robin output, and barge-in without a Zoom account.",
-  "turns": [
-    { "speaker": "participant", "atMs": 0, "transcript": "Robin, prepare a short local note.", "audioFile": "participant-request.wav" },
-    { "speaker": "robin", "atMs": 900, "transcript": "I’ll prepare that now.", "audioFile": "robin-ack.wav" },
-    { "speaker": "participant", "atMs": 1150, "event": "barge_in", "transcript": "Make the title Demo Result.", "audioFile": "participant-interrupt.wav" }
-  ]
-}
