@@ -527,6 +527,8 @@ async def test_follow_up_preserves_revisioned_artifacts(tmp_path: Path) -> None:
     await runtime._task_handles[task.id]
 
     assert task.revision == 2
+    assert len(task.source_context_segment_ids) == 2
+    assert task.source_context_segment_ids[-1] == runtime.transcript[-1].id
     decks = sorted((artifact for artifact in runtime.artifacts if artifact.task_id == task.id and artifact.type == "deck_json"), key=lambda artifact: artifact.revision)
     pptx_decks = sorted((artifact for artifact in runtime.artifacts if artifact.task_id == task.id and artifact.type == "deck_pptx"), key=lambda artifact: artifact.revision)
     validations = sorted((artifact for artifact in runtime.artifacts if artifact.task_id == task.id and artifact.type == "validation_json"), key=lambda artifact: artifact.revision)

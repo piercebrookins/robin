@@ -14,6 +14,7 @@ from .schemas import (
     AgentExecutionResult,
     FileIndexRecord,
     RobinTask,
+    TranscriptSegment,
 )
 from .workspace import Workspace, WorkspaceViolation
 
@@ -39,6 +40,7 @@ class GeneralTaskAgent:
         self,
         task: RobinTask,
         records: list[FileIndexRecord],
+        meeting_context: list[TranscriptSegment] | None = None,
         progress: ProgressCallback | None = None,
     ) -> AgentExecutionResult:
         if not self.client:
@@ -53,6 +55,14 @@ class GeneralTaskAgent:
                     {
                         "request": task.requested_outcome,
                         "constraints": task.constraints,
+                        "meeting_context": [
+                            {
+                                "id": str(segment.id),
+                                "speaker": segment.speaker_name,
+                                "text": segment.text,
+                            }
+                            for segment in (meeting_context or [])[-30:]
+                        ],
                         "workspace_files": [
                             {
                                 "path": record.relative_path,

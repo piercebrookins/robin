@@ -10,7 +10,7 @@ import pytest
 from robin_core.agent import GeneralTaskAgent
 from robin_core.artifacts import ArtifactWorker
 from robin_core.config import DatabaseConfig, ModelConfig, Settings, WorkspaceConfig
-from robin_core.schemas import RobinTask
+from robin_core.schemas import RobinTask, TranscriptSegment
 from robin_core.workspace import Workspace, WorkspaceViolation
 
 
@@ -112,7 +112,16 @@ async def test_general_agent_reads_tools_and_creates_grounded_non_finance_delive
     agent = GeneralTaskAgent(settings, workspace)
     agent.client = fake  # type: ignore[assignment]
 
-    result = await agent.execute(task, records)
+    context = [
+        TranscriptSegment(
+            meeting_id=task.meeting_id,
+            speaker_name="Avery",
+            text="Earlier context that should travel with the task.",
+            started_at_ms=0,
+            ended_at_ms=100,
+        )
+    ]
+    result = await agent.execute(task, records, meeting_context=context)
 
     assert result.deliverable.summary == finding
     assert result.source_paths == [f"source-data/{source_name}"]
@@ -120,6 +129,7 @@ async def test_general_agent_reads_tools_and_creates_grounded_non_finance_delive
         "read_workspace_file",
         "create_deliverable",
     ]
+    assert "Earlier context that should travel" in fake.responses.requests[0]["input"][0]["content"]
     second_input = fake.responses.requests[1]["input"]
     tool_output = next(item for item in second_input if isinstance(item, dict) and item.get("type") == "function_call_output")
     assert "untrusted_content" in tool_output["output"]
@@ -210,7 +220,7 @@ async def test_general_agent_requests_revision_for_overlong_slide_copy(tmp_path:
     async def progress(kind: str, _payload: dict) -> None:
         events.append(kind)
 
-    result = await agent.execute(task, workspace.index(), progress)
+    result = await agent.execute(task, workspace.index(), progress=progress)
 
     assert result.iterations == 3
     assert "agent.deliverable.revision_requested" in events

@@ -8,7 +8,7 @@ from uuid import UUID
 from openai import AsyncOpenAI
 
 from .config import Settings
-from .schemas import MeetingIntent, RobinTask
+from .schemas import MeetingIntent, RobinTask, TranscriptSegment
 
 
 class IntentClassifier:
@@ -97,7 +97,12 @@ class IntentClassifier:
             clarification_question="Should I take that on?" if classification == "possible_task" else None,
         )
 
-    async def respond(self, text: str, active_tasks: list[RobinTask]) -> str:
+    async def respond(
+        self,
+        text: str,
+        active_tasks: list[RobinTask],
+        meeting_context: list[TranscriptSegment] | None = None,
+    ) -> str:
         lowered = text.casefold()
         if any(
             phrase in lowered
@@ -126,6 +131,13 @@ class IntentClassifier:
                                         "active_tasks": [
                                             {"title": task.title, "status": task.status}
                                             for task in active_tasks
+                                        ],
+                                        "recent_meeting_context": [
+                                            {
+                                                "speaker": segment.speaker_name,
+                                                "text": segment.text,
+                                            }
+                                            for segment in (meeting_context or [])[-20:]
                                         ],
                                     }
                                 ),

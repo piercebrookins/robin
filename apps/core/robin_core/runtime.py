@@ -862,6 +862,7 @@ class RobinRuntime:
             task = self._find_task(intent.referenced_task_id)
             task.revision += 1
             task.constraints = sorted(set(task.constraints + intent.constraints + [segment.text]))
+            task.source_context_segment_ids.append(segment.id)
             task.updated_at = now_utc()
             self.store.upsert("task", task)
             await self.emit_event("task.updated", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
@@ -883,7 +884,11 @@ class RobinRuntime:
                 component="conversation",
             )
             await self._acknowledge(
-                await self.intent.respond(segment.text, self._active_tasks())
+                await self.intent.respond(
+                    segment.text,
+                    self._active_tasks(),
+                    self._meeting_context(),
+                )
             )
         elif intent.should_ask_confirmation and intent.clarification_question:
             task = RobinTask(
@@ -1058,7 +1063,10 @@ class RobinRuntime:
                         component="general_agent",
                     )
                     result = await self.task_agent.execute(
-                        task, records, progress=report_agent_progress
+                        task,
+                        records,
+                        meeting_context=self._meeting_context(task.meeting_id),
+                        progress=report_agent_progress,
                     )
                     artifacts, _deck, validation = await asyncio.to_thread(
                         self.artifacts_worker.write_agent_result, task, result
@@ -1112,6 +1120,10 @@ class RobinRuntime:
             await self.emit_event("task.failed", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
             await self.publish()
             await self._safe_acknowledge(self._task_failure_acknowledgement(task))
+
+    def _meeting_context(self, meeting_id: UUID | None = None) -> list[TranscriptSegment]:
+        target = meeting_id or self.meeting_id
+        return [segment for segment in self.transcript if segment.meeting_id == target][-30:]
 
     def _schedule_acknowledgement(self, text: str) -> None:
         handle = asyncio.create_task(self._safe_acknowledge(text))
