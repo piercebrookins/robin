@@ -70,9 +70,19 @@ async def test_process_bridge_passes_configured_output_device(tmp_path: Path) ->
     sent: dict[str, object] = {}
 
     async def fake_send(
-        method: str, params: dict[str, object], timeout_seconds: float = 15
+        method: str,
+        params: dict[str, object],
+        timeout_seconds: float = 15,
+        track_playback: bool = False,
     ):
-        sent.update({"method": method, "params": params, "timeout": timeout_seconds})
+        sent.update(
+            {
+                "method": method,
+                "params": params,
+                "timeout": timeout_seconds,
+                "track_playback": track_playback,
+            }
+        )
         from robin_core.audio.bridge_client import BridgeResponse
 
         return BridgeResponse(id="test", ok=True, result={"played": "true"})
@@ -86,6 +96,7 @@ async def test_process_bridge_passes_configured_output_device(tmp_path: Path) ->
         "output_device": "Exact Virtual Device",
     }
     assert sent["timeout"] == 60
+    assert sent["track_playback"] is True
 
 
 @pytest.mark.asyncio
@@ -100,9 +111,13 @@ async def test_process_bridge_playback_timeout_includes_wav_duration(tmp_path: P
     sent: dict[str, float] = {}
 
     async def fake_send(
-        _method: str, _params: dict[str, object], timeout_seconds: float = 15
+        _method: str,
+        _params: dict[str, object],
+        timeout_seconds: float = 15,
+        track_playback: bool = False,
     ):
         sent["timeout"] = timeout_seconds
+        assert track_playback is True
         from robin_core.audio.bridge_client import BridgeResponse
 
         return BridgeResponse(id="test", ok=True, result={"played": "true"})

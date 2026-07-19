@@ -5,6 +5,7 @@ import AVFoundation
 import CoreAudio
 import CoreGraphics
 import CoreMedia
+import Darwin
 import Foundation
 import ScreenCaptureKit
 
@@ -160,6 +161,11 @@ func playAudioFile(path: String, outputDevice: String = "BlackHole") -> BridgeRe
     }
     do {
         let player = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
+        signal(SIGINT, SIG_IGN)
+        let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        interruptSource.setEventHandler { player.stop() }
+        interruptSource.resume()
+        defer { interruptSource.cancel() }
         player.prepareToPlay()
         let played = player.play()
         if played {
@@ -205,6 +211,11 @@ func playAudioFileWithDefaultDeviceSwap(path: String, outputDevice: String) -> B
     do {
         RunLoop.current.run(until: Date().addingTimeInterval(0.35))
         let player = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
+        signal(SIGINT, SIG_IGN)
+        let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        interruptSource.setEventHandler { player.stop() }
+        interruptSource.resume()
+        defer { interruptSource.cancel() }
         player.prepareToPlay()
         let played = player.play()
         if played {
@@ -399,6 +410,100 @@ final class AudioSampleRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 }
 
+final class PCMStdoutStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
+    private(set) var errorMessage: String?
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
+        guard outputType == .audio,
+              sampleBuffer.isValid,
+              CMSampleBufferDataIsReady(sampleBuffer),
+              let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription),
+              let format = AVAudioFormat(streamDescription: streamDescription) else {
+            return
+        }
+        let frames = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else {
+            errorMessage = "could not allocate streaming audio buffer"
+            return
+        }
+        buffer.frameLength = frames
+        let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer,
+            at: 0,
+            frameCount: Int32(frames),
+            into: buffer.mutableAudioBufferList
+        )
+        guard status == noErr, let channels = buffer.floatChannelData else {
+            errorMessage = "could not copy streaming PCM data: \(status)"
+            return
+        }
+        let channelCount = max(Int(format.channelCount), 1)
+        let downsample = max(Int((format.sampleRate / 24_000).rounded()), 1)
+        var pcm = [Int16]()
+        pcm.reserveCapacity(Int(frames) / downsample + 1)
+        for frame in stride(from: 0, to: Int(frames), by: downsample) {
+            var mixed: Float = 0
+            for channel in 0..<channelCount {
+                mixed += channels[channel][frame]
+            }
+            mixed = max(-1, min(1, mixed / Float(channelCount)))
+            pcm.append(Int16(mixed * Float(Int16.max)))
+        }
+        let data = pcm.withUnsafeBytes { Data($0) }
+        do {
+            try FileHandle.standardOutput.write(contentsOf: data)
+        } catch {
+            errorMessage = "could not write streaming PCM: \(error)"
+        }
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        errorMessage = "\(error)"
+    }
+}
+
+func streamAudioPCM(bundleID: String) async throws {
+    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+    guard let display = content.displays.first else {
+        throw NSError(domain: "RobinBridge", code: 1, userInfo: [NSLocalizedDescriptionKey: "no display available"])
+    }
+    let apps = content.applications.filter { $0.bundleIdentifier == bundleID }
+    guard !apps.isEmpty else {
+        throw NSError(
+            domain: "RobinBridge",
+            code: 2,
+            userInfo: [NSLocalizedDescriptionKey: "application not visible to ScreenCaptureKit: \(bundleID)"]
+        )
+    }
+    let filter = SCContentFilter(display: display, including: apps, exceptingWindows: [])
+    let configuration = SCStreamConfiguration()
+    configuration.capturesAudio = true
+    configuration.excludesCurrentProcessAudio = true
+    configuration.sampleRate = 24_000
+    configuration.channelCount = 1
+    configuration.width = 2
+    configuration.height = 2
+    configuration.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+    let output = PCMStdoutStreamer()
+    let stream = SCStream(filter: filter, configuration: configuration, delegate: output)
+    try stream.addStreamOutput(
+        output,
+        type: .audio,
+        sampleHandlerQueue: DispatchQueue(label: "robin.audio.stream")
+    )
+    try await stream.startCapture()
+    while output.errorMessage == nil {
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+    }
+    try await stream.stopCapture()
+    throw NSError(
+        domain: "RobinBridge",
+        code: 3,
+        userInfo: [NSLocalizedDescriptionKey: output.errorMessage ?? "audio stream stopped"]
+    )
+}
+
 func shareableApplications() async throws -> [SCRunningApplication] {
     let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
     return content.applications
@@ -527,6 +632,19 @@ func write(_ response: BridgeResponse) throws {
 @main
 struct RobinBridgeMain {
     static func main() async {
+        if let streamIndex = CommandLine.arguments.firstIndex(of: "--stream-audio") {
+            let bundleIndex = CommandLine.arguments.index(after: streamIndex)
+            let bundleID = bundleIndex < CommandLine.arguments.endIndex
+                ? CommandLine.arguments[bundleIndex]
+                : "com.google.Chrome"
+            do {
+                try await streamAudioPCM(bundleID: bundleID)
+            } catch {
+                FileHandle.standardError.write(Data("\(error)\n".utf8))
+                exit(1)
+            }
+            return
+        }
         if CommandLine.arguments.contains("--json") {
             let input = FileHandle.standardInput.readDataToEndOfFile()
             do {

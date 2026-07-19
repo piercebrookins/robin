@@ -67,6 +67,12 @@ class AudioConfig(BaseModel):
     openai_max_retries: int = 1
     speech_model: str = "gpt-4o-mini-tts"
     transcription_model: str = "gpt-4o-mini-transcribe"
+    realtime_transcription_enabled: bool = False
+    realtime_transcription_model: str = "gpt-realtime-whisper"
+    realtime_transcription_delay: str = "low"
+    realtime_vad_silence_ms: int = 550
+    realtime_vad_min_speech_ms: int = 180
+    realtime_chunk_bytes: int = 2400
     speech_voice: str = "alloy"
     speech_format: str = "wav"
     output_device_name: str = "BlackHole 2ch"

@@ -245,6 +245,7 @@ class SpeechRecord(BaseModel):
     started_at: datetime = Field(default_factory=now_utc)
     completed_at: datetime | None = None
     error: str | None = None
+    interrupted: bool = False
 
 
 class PresentationSession(BaseModel):

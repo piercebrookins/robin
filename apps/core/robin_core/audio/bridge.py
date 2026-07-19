@@ -8,7 +8,7 @@ from openai import AsyncOpenAI
 
 from ..config import AudioConfig
 from ..schemas import SpeechRecord, now_utc
-from .bridge_client import BridgeClient, create_bridge_client
+from .bridge_client import BridgeClient, PlaybackInterrupted, create_bridge_client
 
 
 class AudioBridge:
@@ -55,6 +55,9 @@ class AudioBridge:
                 record.playback_device = str(playback.result.get("output_device", "")) or None
                 record.playback_route = str(playback.result.get("route", "")) or None
             record.completed_at = now_utc()
+        except PlaybackInterrupted:
+            record.interrupted = True
+            record.completed_at = now_utc()
         except Exception as exc:
             record.error = str(exc)
             record.completed_at = now_utc()
@@ -62,6 +65,9 @@ class AudioBridge:
         finally:
             self.last_record = record
         return record
+
+    async def interrupt_speech(self) -> bool:
+        return await self.bridge_client.interrupt_playback()
 
     async def stop(self) -> None:
         await self.bridge_client.stop_capture()

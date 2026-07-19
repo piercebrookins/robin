@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from robin_core.audio.bridge import AudioBridge
-from robin_core.audio.bridge_client import BridgeResponse, SimulatorBridgeClient
+from robin_core.audio.bridge_client import (
+    BridgeResponse,
+    PlaybackInterrupted,
+    SimulatorBridgeClient,
+)
 from robin_core.config import AudioConfig, DatabaseConfig, RuntimeConfig, Settings, WorkspaceConfig
 from robin_core.runtime import RobinRuntime
 
@@ -31,6 +35,29 @@ class SilentBridgeClient(SimulatorBridgeClient):
 class FailedPlaybackBridgeClient(SimulatorBridgeClient):
     async def play_audio(self, path: Path) -> BridgeResponse:
         return BridgeResponse(id="failed", ok=False, error="BlackHole route failed")
+
+
+class InterruptedPlaybackBridgeClient(SimulatorBridgeClient):
+    async def play_audio(self, path: Path) -> BridgeResponse:
+        raise PlaybackInterrupted("participant spoke")
+
+    async def interrupt_playback(self) -> bool:
+        return True
+
+
+@pytest.mark.asyncio
+async def test_audio_bridge_records_participant_interruption(tmp_path: Path) -> None:
+    audio = AudioBridge(
+        AudioConfig(),
+        tmp_path,
+        bridge_client=InterruptedPlaybackBridgeClient(),
+    )
+
+    record = await audio.speak("This is a longer explanation.")
+
+    assert record.interrupted is True
+    assert record.error is None
+    assert await audio.interrupt_speech() is True
 
 
 class SignalBridgeClient(SimulatorBridgeClient):

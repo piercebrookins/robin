@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from difflib import SequenceMatcher
 from pathlib import Path
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ from uuid import UUID, uuid4
 from .artifacts import ArtifactWorker
 from .agent import GeneralTaskAgent
 from .audio.bridge import AudioBridge
+from .audio.realtime import RealtimeTranscriber
 from .calendar import calendar_snapshot
 from .config import Settings, load_settings
 from .intent import IntentClassifier
@@ -83,6 +85,7 @@ class RobinRuntime:
         self._last_audio_text: str | None = None
         self._last_audio_text_at_ms: int = 0
         self._last_silence_event_at_ms: int = 0
+        self._realtime_partials: dict[str, str] = {}
         self._meet_recovery_event_count = 0
         self.refresh_health()
 
@@ -557,7 +560,13 @@ class RobinRuntime:
         if self._listen_handle and not self._listen_handle.done():
             return self.snapshot()
         self._listen_handle = asyncio.create_task(
-            self._listening_loop(
+            self._realtime_listening_loop(
+                bundle_id=bundle_id or self.settings.audio.capture_bundle_id,
+                max_iterations=max_iterations,
+            )
+            if self.settings.audio.realtime_transcription_enabled
+            and self.settings.openai_api_key
+            else self._listening_loop(
                 bundle_id=bundle_id or self.settings.audio.capture_bundle_id,
                 duration_ms=duration_ms if duration_ms is not None else self.settings.audio.capture_sample_duration_ms,
                 interval_ms=interval_ms if interval_ms is not None else self.settings.audio.capture_loop_interval_ms,
@@ -566,7 +575,17 @@ class RobinRuntime:
         )
         if self.meeting_state == MeetingState.IDLE:
             self.meeting_state = MeetingState.LISTENING
-        await self.emit_event("audio.listen.started", {"bundle_id": bundle_id or self.settings.audio.capture_bundle_id}, component="audio")
+        await self.emit_event(
+            "audio.listen.started",
+            {
+                "bundle_id": bundle_id or self.settings.audio.capture_bundle_id,
+                "mode": "realtime"
+                if self.settings.audio.realtime_transcription_enabled
+                and self.settings.openai_api_key
+                else "bounded",
+            },
+            component="audio",
+        )
         return await self.publish()
 
     async def stop_listening_loop(self) -> RuntimeSnapshot:
@@ -616,6 +635,136 @@ class RobinRuntime:
             self.audio.capture_healthy = False
             self.refresh_health()
             await self.publish()
+
+    async def _realtime_listening_loop(
+        self, bundle_id: str, max_iterations: int | None = None
+    ) -> None:
+        failures = 0
+        completed_turns = 0
+
+        async def on_partial(item_id: str, delta: str) -> None:
+            if not delta:
+                return
+            text = self._realtime_partials.get(item_id, "") + delta
+            self._realtime_partials[item_id] = text
+            await self.emit_event(
+                "audio.transcript.partial",
+                {"item_id": item_id, "text": text},
+                component="audio",
+            )
+            await self.publish()
+
+        async def on_final(item_id: str, transcript: str) -> None:
+            nonlocal completed_turns
+            self._realtime_partials.pop(item_id, None)
+            text = transcript.strip()
+            if not text:
+                return
+            if self._is_recent_robin_echo(text):
+                await self.emit_event(
+                    "audio.transcript.echo_suppressed",
+                    {"item_id": item_id, "text": text},
+                    component="audio",
+                )
+                return
+            normalized = " ".join(text.casefold().split())
+            now_ms = int(time.time() * 1000)
+            if (
+                normalized == self._last_audio_text
+                and now_ms - self._last_audio_text_at_ms < 10_000
+            ):
+                await self.emit_event(
+                    "audio.transcript.duplicate_suppressed",
+                    {"item_id": item_id, "text": text},
+                    component="audio",
+                )
+                return
+            self._last_audio_text = normalized
+            self._last_audio_text_at_ms = now_ms
+            completed_turns += 1
+            await self.ingest_transcript(
+                text,
+                speaker_name="Meeting audio",
+                started_at_ms=now_ms,
+                ended_at_ms=now_ms,
+                source="audio_stt",
+            )
+
+        async def on_speech_started() -> None:
+            speaking = self.meeting_state == MeetingState.SPEAKING
+            interrupted = await self.audio.interrupt_speech() if speaking else False
+            await self.emit_event(
+                "audio.speech.detected",
+                {
+                    "while_robin_speaking": speaking,
+                    "playback_interrupted": interrupted,
+                },
+                component="audio",
+            )
+            await self.publish()
+
+        while max_iterations is None or completed_turns < max_iterations:
+            transcriber = RealtimeTranscriber(
+                api_key=self.settings.openai_api_key or "",
+                model=self.settings.audio.realtime_transcription_model,
+                delay=self.settings.audio.realtime_transcription_delay,
+                threshold=self.settings.audio.silence_rms_threshold,
+                silence_ms=self.settings.audio.realtime_vad_silence_ms,
+                min_speech_ms=self.settings.audio.realtime_vad_min_speech_ms,
+            )
+            try:
+                await self.emit_event(
+                    "audio.realtime.starting",
+                    {"model": self.settings.audio.realtime_transcription_model},
+                    component="audio",
+                )
+                await transcriber.run(
+                    self.audio.bridge_client.stream_audio(
+                        bundle_id, self.settings.audio.realtime_chunk_bytes
+                    ),
+                    on_partial,
+                    on_final,
+                    on_speech_started,
+                )
+                failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failures += 1
+                await self.emit_event(
+                    "audio.realtime.failed",
+                    {"error": str(exc), "consecutive_failures": failures},
+                    component="audio",
+                )
+                await self.publish()
+                if failures >= 3:
+                    await self.emit_event(
+                        "audio.realtime.fallback",
+                        {"mode": "bounded"},
+                        component="audio",
+                    )
+                    await self._listening_loop(
+                        bundle_id=bundle_id,
+                        duration_ms=self.settings.audio.capture_sample_duration_ms,
+                        interval_ms=self.settings.audio.capture_loop_interval_ms,
+                        max_iterations=max_iterations,
+                    )
+                    return
+                await asyncio.sleep(min(2**failures, 5))
+
+    def _is_recent_robin_echo(self, text: str) -> bool:
+        spoken = self.audio.last_spoken_text
+        if not spoken or int(time.time() * 1000) - self._last_spoken_at_ms > 15_000:
+            return False
+        normalized = " ".join(text.casefold().split())
+        expected = " ".join(spoken.casefold().split())
+        if not normalized or not expected:
+            return False
+        return (
+            normalized in expected
+            or expected in normalized
+            or SequenceMatcher(None, normalized, expected).ratio() >= 0.78
+        )
 
     async def create_task(self, text: str, requester_name: str | None = None) -> RobinTask:
         duplicate = await self._handle_duplicate_task_request(text)
@@ -798,7 +947,15 @@ class RobinRuntime:
                 task_id=task_id,
                 component="presentation",
             )
-            await self._acknowledge(speech)
+            record = await self._acknowledge(speech)
+            if record.interrupted:
+                await self.emit_event(
+                    "presentation.narration.interrupted",
+                    {"slide": index},
+                    task_id=task_id,
+                    component="presentation",
+                )
+                break
 
     def _slide_narration(self, deck: DeckSpec, index: int) -> str:
         slide = deck.slides[index]
@@ -1141,7 +1298,7 @@ class RobinRuntime:
             )
             await self.publish()
 
-    async def _acknowledge(self, text: str) -> None:
+    async def _acknowledge(self, text: str) -> SpeechRecord:
         async with self._speech_lock:
             previous = self.meeting_state
             await self._wait_for_speech_floor(text)
@@ -1150,7 +1307,7 @@ class RobinRuntime:
             try:
                 await self.meet.unmute()
                 await self._emit_meet_recovery_events()
-                await self._speak_and_record(text)
+                return await self._speak_and_record(text)
             finally:
                 self._last_spoken_at_ms = int(time.time() * 1000)
                 await self.meet.mute()
@@ -1167,7 +1324,9 @@ class RobinRuntime:
         self.speech.append(speech)
         self.store.upsert("speech", speech)
         await self.emit_event(
-            "speech.completed", speech.model_dump(mode="json"), component="speech"
+            "speech.interrupted" if speech.interrupted else "speech.completed",
+            speech.model_dump(mode="json"),
+            component="speech",
         )
         return speech
 
