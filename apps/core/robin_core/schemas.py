@@ -232,6 +232,7 @@ class AgentExecutionResult(BaseModel):
     iterations: int
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     source_paths: list[str] = Field(default_factory=list)
+    generated_paths: list[str] = Field(default_factory=list)
 
 
 class Artifact(BaseModel):
@@ -246,6 +247,7 @@ class Artifact(BaseModel):
         "validation_json",
         "report_markdown",
         "agent_result_json",
+        "generated_file",
     ]
     path: str
     url: str | None = None

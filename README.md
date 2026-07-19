@@ -77,6 +77,9 @@ make smoke-validation
 make smoke-clarification
 make smoke-queue
 make smoke-dedup
+make smoke-agent
+make smoke-browser-operator
+make smoke-memory
 make demo-reset
 ROBIN_REAL_MEET_URL=https://meet.google.com/... make smoke-real-meet
 ```
@@ -103,6 +106,9 @@ physical microphone is not Chrome output and is therefore not a valid hearing te
   reads only those sources through workspace-scoped tools, and submits a cited presentation and
   Markdown report. The runtime rejects unread or unapproved citations and validates the result
   before it can be presented. Simulator-only runs retain the deterministic finance fixture worker.
+- A generated-file tool for creating and revising Markdown, text, JSON, and CSV outputs inside the
+  active task directory. It forbids path traversal, source edits, executable types, and oversized
+  content; audit records store filenames and byte counts rather than document contents.
 - Demo-readiness preflight covering workspace files, database writes, disk headroom, internet, dashboard, renderer, browser, audio, and simulator-vs-real prerequisites.
 - Supervisor command that starts core and web, waits for health checks, writes logs, and restarts crashed child processes.
 - Workspace boundary enforcement for CSV, XLSX, and PDF files.
@@ -140,7 +146,34 @@ physical microphone is not Chrome output and is therefore not a valid hearing te
   failures, route, duration, and device reported truthfully.
 - Native bridge ScreenCaptureKit app listing and bounded Chrome audio sample capture command.
 - Bounded audio listening loop that captures, transcribes, deduplicates, and ingests meeting audio as transcript segments.
+- Realtime transcription sessions with server VAD and incremental transcript deltas, plus graceful
+  barge-in that stops Robin's native playback when another participant begins speaking.
+- Durable, sourced meeting memory for topics, references, decisions, objections, questions,
+  commitments, corrections, owners, deadlines, and resolution state. Memory survives restarts and
+  is bounded before it is sent back to a model.
+- Approval-gated model browser operator. GPT-5.6 inspects semantic Playwright snapshots and chooses
+  bounded click/fill actions; joins, sends, submissions, sharing, permission changes, destructive
+  actions, and other consequential controls require an exact action-bound confirmation token.
+- Secret redaction at transcript, event, trace, browser-request, and workspace-context boundaries.
+- Enforced peak-memory and workspace-disk budgets, displayed live in the dashboard.
 - Meeting leave cleanup that stops the listening loop and presentation state before returning Robin to ready.
+
+## Operator Evidence and Limitations
+
+Robin distinguishes automated evidence from real-meeting proof:
+
+- `make test` runs unit, integration, recovery, adversarial, long-context, and safety checks.
+- `make smoke-agent`, `make smoke-browser-operator`, and `make smoke-memory` exercise live model
+  tool use, semantic browser inspection, and sourced memory correction.
+- `make smoke-audio-live` proves BlackHole output and Chrome capture/transcription locally.
+- `make smoke-real-meet` exercises the full Meet path, but a successful local process alone is not
+  proof that another participant heard narration or saw the shared surface.
+
+The product definition of done still requires three consecutive fresh-start rehearsals with
+different tasks. Each rehearsal must have participant-side confirmation of bidirectional audio,
+the correct shared surface, audible narration, grounded output, a live Q&A or revision, graceful
+leave, restored browser/audio state, and persisted audit evidence. Speaker names remain best-effort
+unless Meet caption metadata is available. Do not describe Robin as complete until those gates pass.
 
 ## Native Bridge Mode
 

@@ -32,13 +32,19 @@ Implemented and automated as of July 19, 2026:
 - Real API and full-runtime generation of grounded multi-source briefings.
 - Google Meet join/listen/present automation, BlackHole speech routing, loopback audio proof,
   native screen-share dialog control, persisted events, and live dashboard activity.
+- Realtime transcription with server VAD, incremental deltas, and interruption-driven playback stop.
+- Durable sourced meeting memory with correction/resolution semantics and restart persistence.
+- A model-directed semantic browser loop with exact, action-bound approvals for consequential UI.
+- Bounded creation and revision of Markdown, text, JSON, and CSV task outputs in isolated generated directories.
+- Secret redaction, prompt-injection boundaries, bounded model context, and enforced memory/disk budgets.
+- Dashboard views for hearing, speech, beliefs, tool actions, confirmation waits, and resource use.
 
 Not yet complete and therefore not grounds for calling the product finished:
 
-- Realtime streaming speech-to-speech, reliable speaker attribution, and barge-in.
-- General write/edit tools beyond generated reports and presentations.
-- Model-directed browser/computer tools inside the same general task loop.
-- Human approval gates for consequential external actions and broader prompt-injection evals.
+- Streaming TTS playback (TTS is currently synthesized to a bounded WAV before native playback).
+- Reliable named-speaker attribution when Meet caption metadata is unavailable.
+- Rich-format editing beyond generated text/JSON/CSV, reports, and presentations.
+- Model-directed native computer use beyond the controlled Chrome screen-share picker boundary.
 - Three consecutive fresh-start real Meet rehearsals meeting every completion criterion.
 
 ---
@@ -380,6 +386,11 @@ Robin should sound:
 - Completed
 - Failed
 - Cancelled
+- Awaiting confirmation (for a consequential tool action; currently represented by the browser
+  operation and event stream rather than the core task enum)
+- Blocked (required product state; not yet represented by the core task enum)
+- Verified (required product outcome; artifact validation evidence exists, but this is not yet a
+  distinct core task enum)
 
 ### 10.6 Workspace and File Access
 
@@ -392,6 +403,8 @@ Robin should sound:
   - CSV
   - XLSX
   - PDF
+  - PPTX
+  - Markdown and plain text
 - Index available files before or during the meeting.
 - Search files using filenames, metadata, extracted text, and semantic relevance.
 - Record which files were used for each task.
@@ -484,6 +497,10 @@ The dashboard must display:
 - Generated artifacts
 - Error messages
 - Emergency stop
+- Incremental hearing/transcription activity
+- Robin's durable beliefs and their sources
+- Plans, tool actions, approval waits, verification, and recovery evidence
+- Peak memory and workspace disk use against configured budgets
 
 The dashboard must allow:
 
@@ -840,4 +857,10 @@ The presentation refreshes.
 
 ## 21. Product Definition of Done
 
-The hackathon MVP is complete when Robin can independently join a controlled Google Meet, receive and refine a request from any participant, analyze local business files, generate a chart and slide deck, present the result through its own shared screen, explain the output aloud, and remain available for additional meeting work without operator interaction after launch.
+Robin is complete only after all automated checks and three consecutive fresh-start real Google
+Meet rehearsals pass. The rehearsals must use different tasks and each must prove, from another
+participant's side, bidirectional audio, correct understanding, grounded and cited output, the
+correct shared surface, audible narration, live Q&A or revision, graceful leave, restored audio and
+browser state, and persisted audit evidence. Simulator state, a local success flag, a screenshot,
+or loopback audio by itself is insufficient. Until that evidence exists, the product remains an
+active implementation even when individual subsystems pass.

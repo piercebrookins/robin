@@ -25,23 +25,36 @@ The MVP is a hybrid agent system rather than a pure visual computer-use loop:
 - **A Next.js web application** provides the operator dashboard and renders presentations that Robin can share.
 - **SQLite** stores local session, transcript, task, artifact, and health state.
 
-Robin runs in a dedicated logged-in macOS session. The one-command local workflow is implemented,
-but full autonomy is not yet proven: realtime barge-in, general computer tools in the agent loop,
-approval gates, and three qualifying real-Meet rehearsals remain open.
+Robin runs in a dedicated logged-in macOS session. The one-command local workflow, realtime
+transcription/barge-in, durable sourced memory, semantic browser operator, exact approval tokens,
+secret redaction, and resource budgets are implemented. Full autonomy is not yet proven: streamed
+TTS playback, reliable named-speaker attribution, rich-format editing, broader native
+computer tools, explicit blocked/verified task states, and three qualifying real-Meet rehearsals
+remain open.
 
 ### 1.1 Implemented General-Agent Boundary
 
-`GeneralTaskAgent` uses the Responses API function-calling loop and exposes three functions:
+`GeneralTaskAgent` uses the Responses API function-calling loop and exposes four workspace functions:
 
 1. `list_workspace_files(query)` returns bounded metadata for approved source files.
 2. `read_workspace_file(path)` resolves only indexed paths beneath `source-data/`, extracts
    bounded structured content, and marks the result as untrusted.
 3. `create_deliverable(...)` submits a 3–8 slide cited result.
+4. `write_generated_file(name, content)` creates or revises a bounded Markdown, text, JSON, or CSV
+   artifact beneath the active task's generated directory.
 
 The runtime rejects unindexed paths, citations to unread sources, missing citations, missing
 source slides, oversized iteration counts, and structurally invalid deliverables. It persists the
 agent trace and validation evidence alongside the deck, PPTX, and Markdown report. With no API key,
 simulator tests use the old deterministic finance fixture; this is not the real partner-mode path.
+Generated-file writes reject traversal, source-file mutation, executable extensions, and content
+over 100 KB; audit arguments omit the file body.
+
+Separately, `BrowserOperatorAgent` exposes semantic `inspect`, `click`, `fill`, and `finish` tools.
+Every page is re-inspected after an action. Password input is forbidden, page content is marked
+untrusted, and consequential controls require an exact confirmation token cryptographically bound
+to the current page, action, element reference, field name, and arguments. Native Computer Use is
+kept behind the narrower Chrome share-picker adapter because browser APIs cannot access that UI.
 
 ---
 
@@ -95,9 +108,10 @@ GPT-5.6 does not directly accept or emit audio in the same request path. The aud
 - `gpt-4o-mini-transcribe` for the current bounded audio transcription windows
 - `gpt-4o-mini-tts` with the `alloy` voice for voice output
 
-The current model-directed workspace tool loop is implemented. Browser and computer-use actions
-are still orchestrated by deterministic runtime code and recovery policies rather than exposed as
-general-agent tools. Streaming Realtime audio remains a planned replacement for bounded capture.
+The workspace and semantic browser tool loops are implemented. Realtime transcription uses
+`gpt-realtime-whisper` with server VAD and incremental deltas; bounded file transcription remains
+available for diagnostics. TTS currently uses `gpt-4o-mini-tts` and produces a complete WAV before
+the native bridge begins playback, so the streaming-speech target is not yet met.
 
 ### 3.4 Pre-Provisioning
 
@@ -500,6 +514,10 @@ Any non-terminal state:
   -> FAILED
 ```
 
+`awaiting_confirmation` is currently a browser-operation result/event rather than a persisted task
+enum. Artifact validation provides verification evidence, but `BLOCKED` and `VERIFIED` are not yet
+distinct task enum values. They remain required before the state model is complete.
+
 ### 10.4 Speech State
 
 ```text
@@ -611,6 +629,10 @@ The recovery loop receives:
 - Known window geometry
 
 The model returns one bounded action at a time. After each action, Robin captures a new screenshot and verifies progress.
+
+The implemented production boundary is narrower than this intended recovery design: controlled
+macOS automation is currently used for Chrome's native screen-share picker, with PID/window
+pinning, screenshots, and an action trace. Arbitrary model-directed desktop recovery remains open.
 
 ### 11.3 Meet Adapter Interface
 
@@ -779,7 +801,9 @@ For performance, the production IPC implementation should use binary frames. JSO
 
 ### 13.3 Realtime Transcription
 
-`robin-core` creates one realtime transcription session per meeting.
+`robin-core` creates realtime transcription sessions over bounded native capture windows and emits
+incremental deltas plus stabilized final segments. Server VAD is enabled. The current bridge still
+provides bounded WAV capture rather than a single meeting-long binary PCM IPC stream.
 
 Recommended connection:
 
@@ -838,7 +862,7 @@ Suppression should not discard other participants who interrupt Robin. During pl
 
 ### 14.1 Speech Generation
 
-`robin-core` sends concise text to the OpenAI speech endpoint and requests streaming PCM or WAV.
+`robin-core` sends concise text to the OpenAI speech endpoint and currently requests WAV.
 
 Preferred output:
 
@@ -846,7 +870,8 @@ Preferred output:
 24 kHz PCM, mono, 16-bit
 ```
 
-Streaming allows playback to begin before the full response is generated.
+Streaming playback is the target architecture; current playback begins after the complete bounded
+WAV has been synthesized.
 
 ### 14.2 Virtual Microphone Routing
 

@@ -49,6 +49,7 @@ class GeneralTaskAgent:
             raise AgentExecutionError("The general task agent requires OPENAI_API_KEY.")
         allowed = {record.relative_path: record for record in records}
         read_paths: set[str] = set()
+        generated_paths: set[str] = set()
         tool_history: list[dict[str, Any]] = []
         input_items: list[Any] = [
             {
@@ -169,20 +170,29 @@ class GeneralTaskAgent:
                         iterations=iteration,
                         tool_calls=tool_history,
                         source_paths=sorted(read_paths),
+                        generated_paths=sorted(generated_paths),
                     )
-                result = self._run_read_tool(call.name, arguments, records, allowed, read_paths)
+                result = self._run_tool(
+                    call.name,
+                    arguments,
+                    task,
+                    records,
+                    allowed,
+                    read_paths,
+                    generated_paths,
+                )
                 tool_history.append(
                     {
                         "iteration": iteration,
                         "tool": call.name,
-                        "arguments": arguments,
+                        "arguments": self._audit_arguments(call.name, arguments),
                         "result_paths": result.get("paths", []),
                     }
                 )
                 if progress:
                     await progress(
                         "agent.tool.completed",
-                        {"tool": call.name, "arguments": arguments},
+                        {"tool": call.name, "arguments": self._audit_arguments(call.name, arguments)},
                     )
                 input_items.append(
                     {
@@ -195,13 +205,15 @@ class GeneralTaskAgent:
             f"Agent exceeded {self.settings.model.agent_max_iterations} iterations."
         )
 
-    def _run_read_tool(
+    def _run_tool(
         self,
         name: str,
         arguments: dict[str, Any],
+        task: RobinTask,
         records: list[FileIndexRecord],
         allowed: dict[str, FileIndexRecord],
         read_paths: set[str],
+        generated_paths: set[str],
     ) -> dict[str, Any]:
         if name == "list_workspace_files":
             query = str(arguments.get("query", "")).strip()
@@ -227,7 +239,29 @@ class GeneralTaskAgent:
             )
             read_paths.add(path)
             return {"paths": [path], "file": result}
+        if name == "write_generated_file":
+            path = self.workspace.write_generated_text(
+                str(task.id),
+                str(arguments.get("name", "")),
+                str(arguments.get("content", "")),
+            )
+            generated_paths.add(path)
+            return {
+                "paths": [path],
+                "written": True,
+                "bytes": len(str(arguments.get("content", "")).encode("utf-8")),
+            }
         raise AgentExecutionError(f"Unknown agent tool: {name}")
+
+    @staticmethod
+    def _audit_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if name != "write_generated_file":
+            return arguments
+        content = str(arguments.get("content", ""))
+        return {
+            "name": str(arguments.get("name", "")),
+            "content_bytes": len(content.encode("utf-8")),
+        }
 
     def _validate_deliverable(
         self,
@@ -337,6 +371,24 @@ class GeneralTaskAgent:
                         },
                     },
                     "required": ["title", "summary", "slides", "sources"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+            {
+                "type": "function",
+                "name": "write_generated_file",
+                "description": (
+                    "Create or revise a Markdown, text, JSON, or CSV file in this task's isolated "
+                    "generated directory. Never use it for credentials, executable code, or source files."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "content": {"type": "string", "maxLength": 100000},
+                    },
+                    "required": ["name", "content"],
                     "additionalProperties": False,
                 },
                 "strict": True,

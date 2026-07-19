@@ -150,6 +150,15 @@ class ArtifactWorker:
                 path=validation_json.relative_to(self.workspace.root).as_posix(),
             ),
         ]
+        artifacts.extend(
+            Artifact(
+                task_id=task.id,
+                revision=revision,
+                type="generated_file",
+                path=path,
+            )
+            for path in result.generated_paths
+        )
         return artifacts, deck, validation
 
     def _report_markdown(self, result: AgentExecutionResult) -> str:

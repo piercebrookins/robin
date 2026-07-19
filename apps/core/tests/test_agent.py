@@ -225,3 +225,77 @@ async def test_general_agent_requests_revision_for_overlong_slide_copy(tmp_path:
     assert result.iterations == 3
     assert "agent.deliverable.revision_requested" in events
     assert result.tool_calls[1]["error"].startswith("Slide bullets")
+
+
+@pytest.mark.asyncio
+async def test_general_agent_creates_and_revises_scoped_generated_file(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    source = root / "source-data"
+    source.mkdir(parents=True)
+    (source / "notes.txt").write_text("Launch is ready after accessibility review.")
+    settings = Settings(openai_api_key="test-key", workspace=WorkspaceConfig(root=root))
+    workspace = Workspace(settings.workspace)
+    task = RobinTask(
+        meeting_id=uuid4(),
+        title="Meeting notes",
+        request_text="Create concise meeting notes.",
+        requested_outcome="Create concise meeting notes.",
+    )
+    deliverable = {
+        "title": "Meeting notes",
+        "summary": "Accessibility review remains open.",
+        "slides": [
+            {"type": "title", "title": "Meeting notes", "body": ["Launch review"]},
+            {"type": "findings", "title": "Open item", "body": ["Accessibility review"]},
+            {"type": "sources", "title": "Sources", "body": ["notes.txt"]},
+        ],
+        "sources": [
+            {"label": "notes.txt", "path": "source-data/notes.txt", "note": "Launch notes"}
+        ],
+    }
+    fake = FakeClient(
+        [
+            [function_call("read_workspace_file", "read", {"path": "source-data/notes.txt"})],
+            [
+                function_call(
+                    "write_generated_file",
+                    "draft",
+                    {"name": "meeting-notes.md", "content": "# Draft\n\nAccessibility review."},
+                )
+            ],
+            [
+                function_call(
+                    "write_generated_file",
+                    "revise",
+                    {"name": "meeting-notes.md", "content": "# Notes\n\nAccessibility review remains open."},
+                )
+            ],
+            [function_call("create_deliverable", "finish", deliverable)],
+        ]
+    )
+    agent = GeneralTaskAgent(settings, workspace)
+    agent.client = fake  # type: ignore[assignment]
+
+    result = await agent.execute(task, workspace.index())
+
+    expected = f"generated/{task.id}/meeting-notes.md"
+    assert result.generated_paths == [expected]
+    assert result.tool_calls[1]["arguments"] == {
+        "name": "meeting-notes.md",
+        "content_bytes": 30,
+    }
+    assert "Accessibility" not in json.dumps(result.tool_calls[1])
+    assert (root / expected).read_text() == "# Notes\n\nAccessibility review remains open."
+    artifacts, _deck, validation = ArtifactWorker(
+        workspace, "http://127.0.0.1:3000/present"
+    ).write_agent_result(task, result)
+    assert validation.ok
+    assert any(artifact.type == "generated_file" and artifact.path == expected for artifact in artifacts)
+
+
+@pytest.mark.parametrize("name", ["../escape.md", "script.sh", "/tmp/escape.txt"])
+def test_generated_file_rejects_escape_and_executable_types(tmp_path: Path, name: str) -> None:
+    workspace = Workspace(WorkspaceConfig(root=tmp_path / "workspace"))
+
+    with pytest.raises(WorkspaceViolation):
+        workspace.write_generated_text("task", name, "unsafe")

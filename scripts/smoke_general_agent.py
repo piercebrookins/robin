@@ -16,6 +16,7 @@ from robin_core.workspace import Workspace
 REQUESTS = [
     "Identify the most important business context and caveats and prepare a concise briefing.",
     "Compare the available evidence and explain what an executive should verify next.",
+    "Create a concise meeting-notes.md file with sourced decisions, caveats, and next steps, plus a short briefing.",
 ]
 
 
@@ -52,12 +53,14 @@ async def main() -> None:
                 raise SystemExit(f"Task {index} failed validation.")
             if not any(call.get("tool") == "read_workspace_file" for call in result.tool_calls):
                 raise SystemExit(f"Task {index} did not inspect a workspace source.")
+            if index == len(REQUESTS) and not result.generated_paths:
+                raise SystemExit("Generated-file task did not create the requested file.")
             print(
                 f"{index}/{len(REQUESTS)} passed: {result.deliverable.title!r}; "
                 f"{len(result.source_paths)} source(s), {len(artifacts)} artifact(s), "
                 f"{result.iterations} iteration(s)"
             )
-    print("General-agent smoke passed with two different real model tasks.")
+    print("General-agent smoke passed with three different real model tasks, including file creation.")
 
 
 if __name__ == "__main__":
