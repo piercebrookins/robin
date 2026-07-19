@@ -19,7 +19,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { CORE_URL, CORE_WS_URL, getMetrics, getPreflight, getState, postJson } from "../lib/api";
-import type { Artifact, EventEnvelope, PreflightSnapshot, RuntimeMetrics, RuntimeSnapshot } from "../lib/types";
+import type { Artifact, BrowserOperatorResult, EventEnvelope, PreflightSnapshot, RuntimeMetrics, RuntimeSnapshot } from "../lib/types";
 
 const ACTIVE_TASKS = ["AWAITING_CLARIFICATION", "ACCEPTED", "QUEUED", "EXECUTING", "VALIDATING", "READY_TO_PRESENT", "PRESENTING"];
 const ACTIVE_MEETING = ["NAVIGATING", "PREJOIN", "REQUESTING_ADMISSION", "JOINED", "LISTENING", "SPEAKING", "PRESENTING"];
@@ -35,6 +35,8 @@ export default function Dashboard() {
   const [preflight, setPreflight] = useState<PreflightSnapshot | null>(null);
   const [audioTestMessage, setAudioTestMessage] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<RuntimeMetrics | null>(null);
+  const [browserRequest, setBrowserRequest] = useState("");
+  const [browserResult, setBrowserResult] = useState<BrowserOperatorResult | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -146,6 +148,23 @@ export default function Dashboard() {
     } catch (err) {
       setError(readError(err));
       setAudioTestMessage(null);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function runBrowserOperator(approvalToken?: string) {
+    setBusy(approvalToken ? "Confirming browser action" : "Running browser operator");
+    try {
+      const result = await postJson<BrowserOperatorResult>("/api/operator/browser", {
+        request: browserRequest,
+        page_name: "meet",
+        approval_token: approvalToken ?? null,
+      });
+      setBrowserResult(result);
+      setError(null);
+    } catch (err) {
+      setError(readError(err));
     } finally {
       setBusy(null);
     }
@@ -310,6 +329,22 @@ export default function Dashboard() {
               <Metric label="Realtime failures" value={String(metrics?.realtime_failure_count ?? 0)} />
             </div>
           </section>
+          <section className="browser-operator-panel">
+            <h2>Model browser operator</h2>
+            <p className="muted">Robin inspects the open Meet page semantically. External actions pause for exact confirmation.</p>
+            <textarea value={browserRequest} onChange={(event) => setBrowserRequest(event.target.value)} placeholder="Open the meeting details panel" aria-label="Browser operator request" />
+            <button onClick={() => runBrowserOperator()} disabled={busy !== null || !inMeeting || !browserRequest.trim()}>
+              Run browser task
+            </button>
+            {browserResult && <div className="operator-result" aria-live="polite">
+              <p>{browserResult.approval_description ?? browserResult.summary}</p>
+              {browserResult.status === "awaiting_confirmation" && browserResult.approval_token && (
+                <button className="primary" onClick={() => runBrowserOperator(browserResult.approval_token!)} disabled={busy !== null}>
+                  Confirm this exact action
+                </button>
+              )}
+            </div>}
+          </section>
         </div>
       </details>
     </main>
@@ -354,6 +389,10 @@ function eventMessage(event: EventEnvelope) {
     "audio.speech.detected": "Detected a participant speaking",
     "speech.interrupted": "Robin stopped speaking to listen",
     "presentation.narration.interrupted": "Narration paused for participant",
+    "browser.operator.started": "Model browser operator started",
+    "browser.operator.tool": `Browser tool: ${String(event.payload.tool ?? "action").replaceAll("_", " ")}`,
+    "browser.operator.awaiting_confirmation": "Browser action is awaiting confirmation",
+    "browser.operator.completed": "Browser task verified",
     "audio.transcript.partial": `Hearing: ${String(event.payload.text ?? "speech")}`,
     "audio.transcript.echo_suppressed": "Ignored Robin's echoed speech",
     "audio.realtime.fallback": "Realtime unavailable; switched to bounded transcription",

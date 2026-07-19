@@ -1,4 +1,4 @@
-.PHONY: robin setup launch-chrome seed seed-demo dev doctor preflight core web test smoke smoke-test smoke-audio smoke-audio-live smoke-audio-realtime smoke-agent smoke-bridge smoke-capture smoke-listen smoke-leave-cleanup smoke-meet-fixture smoke-meet-recovery smoke-share-dialog-fixture smoke-calendar smoke-observability smoke-workspace smoke-retry-present smoke-validation smoke-clarification smoke-queue smoke-dedup smoke-real-meet demo-reset typecheck
+.PHONY: robin setup launch-chrome seed seed-demo dev doctor preflight core web test smoke smoke-test smoke-audio smoke-audio-live smoke-audio-realtime smoke-browser-operator smoke-agent smoke-bridge smoke-capture smoke-listen smoke-leave-cleanup smoke-meet-fixture smoke-meet-recovery smoke-share-dialog-fixture smoke-calendar smoke-observability smoke-workspace smoke-retry-present smoke-validation smoke-clarification smoke-queue smoke-dedup smoke-real-meet demo-reset typecheck
 
 robin:
 	scripts/run_robin.sh
@@ -46,6 +46,9 @@ smoke-audio-live:
 
 smoke-audio-realtime:
 	uv run python scripts/smoke_realtime_audio.py
+
+smoke-browser-operator:
+	uv run python scripts/smoke_browser_operator.py
 
 smoke-agent:
 	PYTHONPATH=apps/core uv run python scripts/smoke_general_agent.py

@@ -8,11 +8,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from .runtime import RobinRuntime
+from .browser.operator_agent import BrowserOperatorResult
 from .preflight import run_preflight
 from .schemas import (
     AudioCaptureSampleRequest,
     AudioListenLoopRequest,
     AudioTranscribeRequest,
+    BrowserOperatorRequest,
     CalendarAutoJoinRequest,
     CalendarSnapshot,
     EventEnvelope,
@@ -244,6 +246,22 @@ async def start_audio_listen(request: AudioListenLoopRequest) -> RuntimeSnapshot
 @app.post("/api/audio/listen/stop", response_model=RuntimeSnapshot)
 async def stop_audio_listen() -> RuntimeSnapshot:
     return await runtime.stop_listening_loop()
+
+
+@app.post("/api/operator/browser", response_model=BrowserOperatorResult)
+async def run_browser_operator(request: BrowserOperatorRequest) -> BrowserOperatorResult:
+    try:
+        return await runtime.run_browser_operator(
+            request.request,
+            page_name=request.page_name,
+            approval_token=request.approval_token,
+        )
+    except Exception as exc:
+        await runtime.emit_event(
+            "browser.operator.failed", {"error": str(exc)}, component="browser_operator"
+        )
+        await runtime.publish()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/tasks", response_model=RuntimeSnapshot)

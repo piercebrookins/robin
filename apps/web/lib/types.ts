@@ -168,6 +168,14 @@ export type AudioCaptureResult = {
   error: string | null;
 };
 
+export type BrowserOperatorResult = {
+  status: "completed" | "awaiting_confirmation";
+  summary: string;
+  tool_calls: Array<Record<string, unknown>>;
+  approval_token: string | null;
+  approval_description: string | null;
+};
+
 export type PresentationSession = {
   task_id: string;
   active_slide: number;

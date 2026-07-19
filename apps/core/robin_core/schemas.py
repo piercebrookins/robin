@@ -354,6 +354,12 @@ class AudioListenLoopRequest(BaseModel):
     max_iterations: int | None = None
 
 
+class BrowserOperatorRequest(BaseModel):
+    request: str
+    page_name: str = "meet"
+    approval_token: str | None = None
+
+
 class CalendarAutoJoinRequest(BaseModel):
     enabled: bool
     interval_seconds: float = 15.0

@@ -105,6 +105,9 @@ p { color: var(--muted); line-height: 1.5; }
 .details-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 20px; }
 .audio-checks { border-top: 1px solid var(--line); padding-top: 18px; grid-column: 1 / -1; }
 .resource-panel { border-top: 1px solid var(--line); padding-top: 18px; grid-column: 1 / -1; }
+.browser-operator-panel { border-top: 1px solid var(--line); padding-top: 18px; grid-column: 1 / -1; }
+.operator-result { margin-top: 10px; border-left: 3px solid var(--accent); padding: 9px 12px; background: var(--soft); }
+.operator-result p { margin-bottom: 8px; }
 .metric-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .metric-list > div { border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: grid; }
 .metric-list span { color: var(--muted); font-size: .7rem; }

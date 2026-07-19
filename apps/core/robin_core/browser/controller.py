@@ -4,7 +4,20 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from robin_core.config import BrowserConfig
-from robin_core.browser.page_driver import PageDriver, PlaywrightPageDriver, SimulatedPageDriver
+from robin_core.browser.page_driver import (
+    InteractiveElement,
+    PageDriver,
+    PageSnapshot,
+    PlaywrightPageDriver,
+    SimulatedPageDriver,
+)
+
+
+class OperatorApprovalRequired(PermissionError):
+    def __init__(self, action: str, element: InteractiveElement):
+        super().__init__(f"Approval required to {action} {element.name or element.ref!r}")
+        self.action = action
+        self.element = element
 
 
 @dataclass
@@ -14,6 +27,7 @@ class BrowserController:
     _playwright: object | None = None
     _browser: object | None = None
     _context: object | None = None
+    _owns_browser: bool = False
 
     async def open_page(self, name: str, url: str) -> PageDriver:
         existing = self.pages.get(name)
@@ -43,15 +57,72 @@ class BrowserController:
         if page:
             await page.close()
 
+    async def inspect_for_operator(self, name: str) -> PageSnapshot:
+        return await self._operator_page(name).inspect()
+
+    async def click_for_operator(self, name: str, ref: str, approved: bool = False) -> InteractiveElement:
+        page = self._operator_page(name)
+        snapshot = await page.inspect()
+        element = next((item for item in snapshot.elements if item.ref == ref), None)
+        if element is None:
+            raise KeyError(f"Unknown or stale page element: {ref}")
+        if self._requires_approval("click", element) and not approved:
+            raise OperatorApprovalRequired("click", element)
+        return await page.click_ref(ref)
+
+    async def fill_for_operator(
+        self, name: str, ref: str, text: str, approved: bool = False
+    ) -> InteractiveElement:
+        if len(text) > 2000:
+            raise ValueError("Browser input is limited to 2000 characters")
+        page = self._operator_page(name)
+        snapshot = await page.inspect()
+        element = next((item for item in snapshot.elements if item.ref == ref), None)
+        if element is None:
+            raise KeyError(f"Unknown or stale page element: {ref}")
+        if element.kind == "password":
+            raise PermissionError("Robin cannot fill password fields")
+        if self._requires_approval("fill", element) and not approved:
+            raise OperatorApprovalRequired("fill", element)
+        return await page.fill_ref(ref, text)
+
+    def _operator_page(self, name: str) -> PageDriver:
+        page = self.pages.get(name)
+        if page is None or page.is_closed():
+            raise KeyError(f"Operator page is not open: {name}")
+        return page
+
+    @staticmethod
+    def _requires_approval(action: str, element: InteractiveElement) -> bool:
+        label = f"{element.name} {element.role} {element.kind}".casefold()
+        risky = (
+            "join",
+            "leave",
+            "share",
+            "present",
+            "send",
+            "submit",
+            "upload",
+            "download",
+            "allow",
+            "permission",
+            "delete",
+            "remove",
+        )
+        return any(word in label for word in risky) or (
+            action == "fill" and element.kind in {"file", "password"}
+        )
+
     async def close(self) -> None:
         for name in list(self.pages):
             await self.close_page(name)
-        if self._context:
+        if self._context and self._owns_browser:
             await self._context.close()
-            self._context = None
-        if self._browser:
+        self._context = None
+        if self._browser and self._owns_browser:
             await self._browser.close()
-            self._browser = None
+        self._browser = None
+        self._owns_browser = False
         if self._playwright:
             await self._playwright.stop()
             self._playwright = None
@@ -63,6 +134,7 @@ class BrowserController:
             self._playwright = await async_playwright().start()
         if self._context is None:
             if self.config.connection_mode == "cdp":
+                self._owns_browser = False
                 self._browser = await self._playwright.chromium.connect_over_cdp(
                     self.config.cdp_endpoint,
                     no_defaults=True,
@@ -70,6 +142,7 @@ class BrowserController:
                 contexts = self._browser.contexts
                 self._context = contexts[0] if contexts else await self._browser.new_context()
             else:
+                self._owns_browser = True
                 self._context = await self._launch_persistent_context()
         if name == "presentation":
             await self._close_stale_presentation_pages(url)

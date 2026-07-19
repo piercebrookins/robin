@@ -15,6 +15,23 @@ class PresentationReadiness:
     screenshot_safe: bool = True
 
 
+@dataclass(frozen=True)
+class InteractiveElement:
+    ref: str
+    role: str
+    name: str
+    kind: str
+    disabled: bool = False
+
+
+@dataclass(frozen=True)
+class PageSnapshot:
+    url: str
+    title: str
+    text: str
+    elements: list[InteractiveElement]
+
+
 class PageDriver(Protocol):
     url: str
 
@@ -33,6 +50,12 @@ class PageDriver(Protocol):
 
     async def screenshot(self) -> bytes: ...
 
+    async def inspect(self) -> PageSnapshot: ...
+
+    async def click_ref(self, ref: str) -> InteractiveElement: ...
+
+    async def fill_ref(self, ref: str, text: str) -> InteractiveElement: ...
+
     async def bring_to_front(self) -> None: ...
 
     async def close(self) -> None: ...
@@ -50,6 +73,9 @@ class SimulatedPageDriver:
     presentation_error: str | None = None
     presentation_task_id: str | None = None
     presentation_revision: str | None = None
+    title: str = "Simulated page"
+    operator_elements: dict[str, InteractiveElement] = field(default_factory=dict)
+    filled: dict[str, str] = field(default_factory=dict)
 
     async def goto(self, url: str, timeout_ms: int) -> None:
         self.url = url
@@ -87,6 +113,34 @@ class SimulatedPageDriver:
     async def screenshot(self) -> bytes:
         keys = ",".join(sorted(self.visible_keys))
         return f"simulated-page url={self.url} visible={keys}".encode()
+
+    async def inspect(self) -> PageSnapshot:
+        return PageSnapshot(
+            url=self.url,
+            title=self.title,
+            text=",".join(sorted(self.visible_keys)),
+            elements=list(self.operator_elements.values()),
+        )
+
+    async def click_ref(self, ref: str) -> InteractiveElement:
+        element = self._operator_element(ref)
+        if element.disabled:
+            raise RuntimeError(f"Element {ref} is disabled")
+        self.clicked.append(ref)
+        return element
+
+    async def fill_ref(self, ref: str, text: str) -> InteractiveElement:
+        element = self._operator_element(ref)
+        if element.kind not in {"input", "textarea", "contenteditable"}:
+            raise RuntimeError(f"Element {ref} is not editable")
+        self.filled[ref] = text
+        return element
+
+    def _operator_element(self, ref: str) -> InteractiveElement:
+        try:
+            return self.operator_elements[ref]
+        except KeyError as exc:
+            raise KeyError(f"Unknown or stale page element: {ref}") from exc
 
     async def wait_for_presentation_ready(
         self,
@@ -161,6 +215,8 @@ class SimulatedPageDriver:
 class PlaywrightPageDriver:
     def __init__(self, page):
         self.page = page
+        self._operator_refs: dict[str, object] = {}
+        self._operator_elements: dict[str, InteractiveElement] = {}
 
     @property
     def url(self) -> str:
@@ -201,6 +257,60 @@ class PlaywrightPageDriver:
 
     async def screenshot(self) -> bytes:
         return await self.page.screenshot(full_page=True)
+
+    async def inspect(self) -> PageSnapshot:
+        self._operator_refs = {}
+        self._operator_elements = {}
+        candidates = self.page.locator(
+            "button,a,input,textarea,select,[role=button],[role=link],[contenteditable=true]"
+        )
+        elements: list[InteractiveElement] = []
+        for index in range(min(await candidates.count(), 60)):
+            locator = candidates.nth(index)
+            if not await locator.is_visible():
+                continue
+            tag = await locator.evaluate("element => element.tagName.toLowerCase()")
+            input_type = (await locator.get_attribute("type") or "").casefold()
+            kind = "password" if input_type == "password" else str(tag)
+            if await locator.get_attribute("contenteditable") == "true":
+                kind = "contenteditable"
+            name = (
+                await locator.get_attribute("aria-label")
+                or await locator.get_attribute("title")
+                or await locator.inner_text()
+                or await locator.get_attribute("placeholder")
+                or ""
+            ).strip()[:180]
+            role = (await locator.get_attribute("role") or str(tag)).casefold()
+            ref = f"e{len(elements) + 1}"
+            disabled = await locator.is_disabled()
+            element = InteractiveElement(ref, role, name, kind, disabled)
+            self._operator_refs[ref] = locator
+            self._operator_elements[ref] = element
+            elements.append(element)
+        body_text = " ".join((await self.page.locator("body").inner_text()).split())[:6000]
+        return PageSnapshot(self.url, await self.page.title(), body_text, elements)
+
+    async def click_ref(self, ref: str) -> InteractiveElement:
+        element, locator = self._resolve_operator_ref(ref)
+        if element.disabled:
+            raise RuntimeError(f"Element {ref} is disabled")
+        await locator.click()
+        return element
+
+    async def fill_ref(self, ref: str, text: str) -> InteractiveElement:
+        element, locator = self._resolve_operator_ref(ref)
+        if element.kind == "password":
+            raise PermissionError("Robin cannot fill password fields")
+        if element.kind not in {"input", "textarea", "contenteditable"}:
+            raise RuntimeError(f"Element {ref} is not editable")
+        await locator.fill(text)
+        return element
+
+    def _resolve_operator_ref(self, ref: str):
+        if ref not in self._operator_refs or ref not in self._operator_elements:
+            raise KeyError(f"Unknown or stale page element: {ref}; inspect the page again")
+        return self._operator_elements[ref], self._operator_refs[ref]
 
     async def wait_for_presentation_ready(
         self,

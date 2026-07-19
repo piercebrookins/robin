@@ -18,6 +18,7 @@ from .calendar import calendar_snapshot
 from .config import Settings, load_settings
 from .intent import IntentClassifier
 from .browser.controller import BrowserController
+from .browser.operator_agent import BrowserOperatorResult, ControlledBrowserAgent
 from .meeting.adapters.google_meet import GoogleMeetAdapter
 from .persistence import Store
 from .schemas import (
@@ -51,8 +52,9 @@ class RobinRuntime:
         self.store = Store(self.settings.database.path)
         self.intent = IntentClassifier(self.settings)
         self.artifacts_worker = ArtifactWorker(self.workspace, self.settings.presentation.base_url)
-        self.task_agent = GeneralTaskAgent(self.settings, self.workspace)
         self.browser = BrowserController(self.settings.browser)
+        self.task_agent = GeneralTaskAgent(self.settings, self.workspace)
+        self.browser_operator = ControlledBrowserAgent(self.settings, self.browser)
         self.meet = GoogleMeetAdapter(self.browser, self.settings.browser)
         self.audio = AudioBridge(
             self.settings.audio,
@@ -599,6 +601,36 @@ class RobinRuntime:
         self._listen_handle = None
         await self.emit_event("audio.listen.stopped", {}, component="audio")
         return await self.publish()
+
+    async def run_browser_operator(
+        self,
+        request: str,
+        page_name: str = "meet",
+        approval_token: str | None = None,
+    ) -> BrowserOperatorResult:
+        await self.emit_event(
+            "browser.operator.started",
+            {"request": request[:500], "page": page_name},
+            component="browser_operator",
+        )
+        result = await self.browser_operator.execute(
+            request, page_name, approval_token=approval_token
+        )
+        for call in result.tool_calls:
+            await self.emit_event(
+                "browser.operator.tool",
+                call,
+                component="browser_operator",
+            )
+        await self.emit_event(
+            "browser.operator.awaiting_confirmation"
+            if result.status == "awaiting_confirmation"
+            else "browser.operator.completed",
+            result.model_dump(mode="json"),
+            component="browser_operator",
+        )
+        await self.publish()
+        return result
 
     async def _listening_loop(self, bundle_id: str, duration_ms: int, interval_ms: int, max_iterations: int | None) -> None:
         iterations = 0
