@@ -49,6 +49,8 @@ class PageDriver(Protocol):
 
     async def is_visible(self, candidates: list[SelectorCandidate], timeout_ms: int) -> bool: ...
 
+    async def ensure_microphone_device(self, device_name: str, timeout_ms: int) -> str: ...
+
     async def wait_for_presentation_ready(
         self,
         expected_task_id: str,
@@ -99,6 +101,10 @@ class SimulatedPageDriver:
     uploaded: dict[str, str] = field(default_factory=dict)
     download_names: dict[str, str] = field(default_factory=dict)
     caption_turns: list[CaptionTurn] = field(default_factory=list)
+    microphone_device: str = "BlackHole 2ch (Virtual)"
+    available_microphone_devices: list[str] = field(
+        default_factory=lambda: ["BlackHole 2ch (Virtual)", "MacBook Microphone (Built-in)"]
+    )
 
     async def goto(self, url: str, timeout_ms: int) -> None:
         self.url = url
@@ -134,6 +140,20 @@ class SimulatedPageDriver:
 
     async def is_visible(self, candidates: list[SelectorCandidate], timeout_ms: int) -> bool:
         return self._key_for(candidates) in self.visible_keys
+
+    async def ensure_microphone_device(self, device_name: str, timeout_ms: int) -> str:
+        matching = next(
+            (
+                device
+                for device in self.available_microphone_devices
+                if device_name.casefold() in device.casefold()
+            ),
+            None,
+        )
+        if matching is None:
+            raise RuntimeError(f"Meet microphone device is unavailable: {device_name}")
+        self.microphone_device = matching
+        return matching
 
     async def screenshot(self) -> bytes:
         keys = ",".join(sorted(self.visible_keys))
@@ -305,6 +325,153 @@ class PlaywrightPageDriver:
             except Exception:
                 continue
         return False
+
+    async def ensure_microphone_device(self, device_name: str, timeout_ms: int) -> str:
+        """Select and verify Meet's microphone without relying on hit-test coordinates.
+
+        Meet renders the device picker as custom buttons rather than a native
+        ``select``.  Programmatic DOM clicks avoid the tiny arrow button
+        occasionally landing on the adjacent mute control in compact layouts.
+        """
+
+        target = " ".join(device_name.split()).casefold()
+        if not target:
+            raise ValueError("Microphone device name is required")
+
+        async def selected_label() -> str:
+            locator = self.page.locator('button[aria-label^="Microphone:"]')
+            for index in range(await locator.count()):
+                label = (await locator.nth(index).get_attribute("aria-label") or "").strip()
+                if label:
+                    return label.removeprefix("Microphone:").strip()
+            return ""
+
+        current = await selected_label()
+        if target in current.casefold():
+            if "blackhole" in target:
+                await self._disable_virtual_microphone_processing(timeout_ms)
+            return current
+
+        audio_settings = self.page.locator('button[aria-label="Audio settings"]')
+        try:
+            await audio_settings.first.wait_for(state="attached", timeout=timeout_ms)
+        except Exception as exc:
+            raise RuntimeError("Meet audio settings control is unavailable") from exc
+        if (await audio_settings.first.get_attribute("aria-expanded")) != "true":
+            await audio_settings.first.evaluate("element => element.click()")
+
+        device_button = self.page.locator('button[aria-label^="Microphone:"]')
+        try:
+            await device_button.first.wait_for(state="visible", timeout=timeout_ms)
+        except Exception as exc:
+            raise RuntimeError("Meet microphone picker is unavailable") from exc
+        current = await selected_label()
+        if target not in current.casefold():
+            await device_button.first.evaluate("element => element.click()")
+            options = self.page.locator(
+                '[role="option"], [role="menuitemradio"], [role="menuitem"], [role="radio"]'
+            )
+            match = None
+            try:
+                await options.first.wait_for(state="attached", timeout=timeout_ms)
+                for index in range(await options.count()):
+                    option = options.nth(index)
+                    label = " ".join(
+                        (
+                            await option.get_attribute("aria-label")
+                            or await option.inner_text()
+                            or ""
+                        ).split()
+                    )
+                    if target in label.casefold() and await option.is_visible():
+                        match = option
+                        break
+            except Exception:
+                match = None
+            if match is None:
+                raise RuntimeError(f"Meet microphone device is unavailable: {device_name}")
+            await match.evaluate("element => element.click()")
+
+        deadline_ms = max(timeout_ms, 250)
+        try:
+            await self.page.wait_for_function(
+                """([needle]) => [...document.querySelectorAll('button[aria-label^="Microphone:"]')]
+                    .some(button => (button.getAttribute('aria-label') || '').toLowerCase().includes(needle))""",
+                arg=[target],
+                timeout=deadline_ms,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Meet did not retain microphone device selection: {device_name}"
+            ) from exc
+        verified = await selected_label()
+        if target not in verified.casefold():
+            raise RuntimeError(
+                f"Meet selected microphone {verified or 'unknown'}, expected {device_name}"
+            )
+        if "blackhole" in target:
+            await self._disable_virtual_microphone_processing(timeout_ms)
+        return verified
+
+    async def _disable_virtual_microphone_processing(self, timeout_ms: int) -> None:
+        """Keep Meet from filtering or merging an injected virtual-mic signal."""
+
+        switches = self.page.locator(
+            'button[role="switch"][aria-label="Studio sound"], '
+            'button[role="switch"][aria-label="Adaptive audio"]'
+        )
+        switches_visible = any(
+            [await switches.nth(index).is_visible() for index in range(await switches.count())]
+        )
+        if not switches_visible:
+            audio_settings = self.page.locator('button[aria-label="Audio settings"]')
+            if (
+                await audio_settings.count()
+                and (await audio_settings.first.get_attribute("aria-expanded")) != "true"
+            ):
+                await audio_settings.first.evaluate("element => element.click()")
+            settings = self.page.locator('button[aria-label="Settings"]')
+            visible_settings = None
+            for index in range(await settings.count()):
+                if await settings.nth(index).is_visible():
+                    visible_settings = settings.nth(index)
+                    break
+            # Some Meet editions do not expose these processing controls. In
+            # that case device verification is still valid and there is no
+            # processing toggle to enforce.
+            if visible_settings is None:
+                return
+            await visible_settings.evaluate("element => element.click()")
+            try:
+                await switches.first.wait_for(state="visible", timeout=timeout_ms)
+            except Exception as exc:
+                raise RuntimeError("Meet audio processing settings did not open") from exc
+
+        for label in ("Studio sound", "Adaptive audio"):
+            control = self.page.locator(f'button[role="switch"][aria-label="{label}"]')
+            if not await control.count():
+                continue
+            if (await control.first.get_attribute("aria-checked")) == "true":
+                # Meet's switch controller ignores synthetic DOM clicks but
+                # accepts a trusted pointer event at the control itself.
+                await control.first.click(force=True, timeout=timeout_ms)
+            try:
+                await self.page.wait_for_function(
+                    """([name]) => {
+                        const control = document.querySelector(
+                          `button[role="switch"][aria-label="${name}"]`
+                        );
+                        return !control || control.getAttribute('aria-checked') === 'false';
+                    }""",
+                    arg=[label],
+                    timeout=max(timeout_ms, 250),
+                )
+            except Exception as exc:
+                raise RuntimeError(f"Meet kept {label} enabled for BlackHole") from exc
+
+        close = self.page.locator('button[aria-label="Close dialogue"]')
+        if await close.count() and await close.first.is_visible():
+            await close.first.evaluate("element => element.click()")
 
     async def screenshot(self) -> bytes:
         return await self.page.screenshot(full_page=True)

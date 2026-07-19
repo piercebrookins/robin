@@ -33,6 +33,7 @@ class BrowserRecoveryEvent:
 class GoogleMeetAdapter:
     browser: BrowserController
     config: BrowserConfig
+    microphone_device_name: str = "BlackHole 2ch"
     state: MeetingState = MeetingState.IDLE
     current_url: str | None = None
     meet_page: PageDriver | None = None
@@ -44,6 +45,7 @@ class GoogleMeetAdapter:
     share_dialog: ShareDialogController | None = None
     share_dialog_result: ShareDialogResult | None = None
     presentation_evidence_path: str | None = None
+    selected_microphone_device: str | None = None
 
     def __post_init__(self) -> None:
         if self.share_dialog is None:
@@ -54,6 +56,7 @@ class GoogleMeetAdapter:
         if parsed.hostname not in set(self.config.allowed_meet_hosts):
             raise ValueError("Only Google Meet URLs are supported.")
         self.current_url = meeting_url
+        self.selected_microphone_device = None
         recovery_count = self.browser.recovery_count
         self.meet_page = await self.browser.open_page("meet", meeting_url)
         if self.browser.recovery_count > recovery_count:
@@ -101,17 +104,20 @@ class GoogleMeetAdapter:
         if await self._is_admitted():
             await self.camera_off()
             await self.mute()
+            await self.ensure_microphone_device()
             await self.enable_captions()
             self.state = MeetingState.LISTENING
             return
         await self.enter_prejoin()
         await self.camera_off()
         await self.mute()
+        await self.ensure_microphone_device()
         await self._click_with_recovery(
             "join_button", MEET_SELECTORS["join_button"], self.config.prejoin_timeout_ms
         )
         self.state = MeetingState.REQUESTING_ADMISSION
         await self._wait_for_admission()
+        await self.ensure_microphone_device()
         await self.enable_captions()
         self.state = MeetingState.LISTENING
 
@@ -288,6 +294,7 @@ class GoogleMeetAdapter:
 
     async def unmute(self) -> None:
         if self.meet_page:
+            await self.ensure_microphone_device()
             if await self.meet_page.is_visible(MEET_SELECTORS["unmute_button"], 750):
                 await self._click_with_recovery(
                     "unmute_button", MEET_SELECTORS["unmute_button"], 3_000
@@ -296,7 +303,29 @@ class GoogleMeetAdapter:
                 raise RuntimeError(
                     "Meet microphone control is unavailable; could not unmute Robin."
                 )
+            await asyncio.sleep(max(self.config.microphone_settle_ms, 0) / 1000)
         self.muted = False
+
+    async def ensure_microphone_device(self) -> str:
+        page = self._page()
+        try:
+            selected = await page.ensure_microphone_device(
+                self.microphone_device_name,
+                min(max(self.config.prejoin_timeout_ms, 2_000), 10_000),
+            )
+        except Exception as exc:
+            screenshot_path = await self._capture_recovery_screenshot("microphone_device", 1, page)
+            self._record_recovery(
+                "microphone_device",
+                1,
+                recovered=False,
+                error=str(exc),
+                page=page,
+                screenshot_path=screenshot_path,
+            )
+            raise
+        self.selected_microphone_device = selected
+        return selected
 
     async def camera_off(self) -> None:
         self.camera_enabled = False

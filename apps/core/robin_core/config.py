@@ -56,6 +56,7 @@ class BrowserConfig(BaseModel):
     share_dialog_poll_interval_ms: int = 250
     computer_use_command: str = "cua-driver"
     captions_enabled: bool = True
+    microphone_settle_ms: int = 750
 
 
 class AudioConfig(BaseModel):

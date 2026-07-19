@@ -95,6 +95,10 @@ uv run python scripts/smoke_capture.py --bundle-id com.apple.Safari
 `make smoke-audio-live` is the complete local audio proof. It generates real OpenAI speech,
 records and transcribes that speech directly from BlackHole 2ch, then plays the phrase from
 Robin's signed-in Chrome, captures Chrome with ScreenCaptureKit, and transcribes the result.
+For a real Meet, Robin also selects and verifies BlackHole before joining and before every
+utterance. It disables Meet's Studio sound and Adaptive audio processing for the virtual
+microphone so Meet cannot filter or merge the injected speech. A missing or stale device now
+fails the utterance instead of recording a false audio success.
 The hearing check captures audio *coming out of
 Chrome*—in a real Meet, speak from another participant or device. Speaking into the same Mac's
 physical microphone is not Chrome output and is therefore not a valid hearing test.
@@ -187,6 +191,8 @@ Robin distinguishes automated evidence from real-meeting proof:
   revisions, latest-revision narration, and cleanup as one outcome-based flow.
 - `make smoke-resource-budgets` compares measured RSS and workspace size with configured limits.
 - `make smoke-audio-live` proves BlackHole output and Chrome capture/transcription locally.
+- Real-Meet speech verifies the selected BlackHole device, disables Meet processing that can
+  suppress virtual-mic audio, and gives the unmuted WebRTC track time to settle before playback.
 - `make smoke-real-meet` exercises the full Meet path, but a successful local process alone is not
   proof that another participant heard narration or saw the shared surface.
 

@@ -22,6 +22,7 @@ MEET_PAGE = b"""<!doctype html>
   <button data-testid="camera-button">Turn off camera</button>
   <button data-testid="mute-button">Turn off microphone</button>
   <button data-testid="unmute-button">Turn on microphone</button>
+  <button aria-label="Microphone: BlackHole 2ch (Virtual)" hidden>BlackHole 2ch</button>
   <button data-testid="join-button">Join now</button>
   <button data-testid="leave-button" hidden>Leave call</button>
   <button data-testid="joined-signal" hidden>Leave meeting</button>

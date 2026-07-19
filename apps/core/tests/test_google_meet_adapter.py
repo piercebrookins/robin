@@ -31,6 +31,7 @@ async def test_google_meet_simulator_join_flow_clicks_prejoin_controls() -> None
     assert "join_button" in adapter.meet_page.clicked
     assert "prejoin_mute_button" in adapter.meet_page.clicked
     assert "prejoin_camera_button" in adapter.meet_page.clicked
+    assert adapter.selected_microphone_device == "BlackHole 2ch (Virtual)"
 
 
 @pytest.mark.asyncio
@@ -212,6 +213,90 @@ async def test_playwright_driver_clicks_visible_duplicate_selector_match() -> No
 
         assert await page.locator("button:visible").get_attribute("data-clicked") == "yes"
         await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_playwright_driver_selects_and_verifies_meet_microphone() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(
+            """
+            <button aria-label="Audio settings" aria-expanded="false"
+              onclick="this.setAttribute('aria-expanded','true'); document.querySelector('#panel').hidden=false">
+              Audio settings
+            </button>
+            <div id="panel" hidden>
+              <button aria-label="Microphone: MacBook Microphone (Built-in)"
+                onclick="document.querySelector('#choices').hidden=false">Microphone</button>
+              <div id="choices" hidden>
+                <button role="menuitemradio"
+                  onclick="document.querySelector('[aria-label^=&quot;Microphone:&quot;]').setAttribute('aria-label','Microphone: BlackHole 2ch (Virtual)')">
+                  BlackHole 2ch (Virtual)
+                </button>
+              </div>
+            </div>
+            """
+        )
+
+        selected = await PlaywrightPageDriver(page).ensure_microphone_device("BlackHole 2ch", 1_000)
+
+        assert selected == "BlackHole 2ch (Virtual)"
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_playwright_driver_disables_processing_for_blackhole() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(
+            """
+            <button aria-label="Audio settings" aria-expanded="false"
+              onclick="this.setAttribute('aria-expanded','true'); document.querySelector('#quick').hidden=false">
+              Audio settings
+            </button>
+            <div id="quick" hidden>
+              <button aria-label="Microphone: BlackHole 2ch (Virtual)">Microphone</button>
+              <button aria-label="Settings"
+                onclick="document.querySelector('#dialog').hidden=false">Settings</button>
+            </div>
+            <div id="dialog" hidden>
+              <button role="switch" aria-label="Studio sound" aria-checked="true"
+                onclick="this.setAttribute('aria-checked','false')"></button>
+              <button role="switch" aria-label="Adaptive audio" aria-checked="true"
+                onclick="this.setAttribute('aria-checked','false')"></button>
+              <button aria-label="Close dialogue" onclick="this.parentElement.hidden=true"></button>
+            </div>
+            """
+        )
+
+        selected = await PlaywrightPageDriver(page).ensure_microphone_device("BlackHole 2ch", 1_000)
+
+        assert selected == "BlackHole 2ch (Virtual)"
+        assert (
+            await page.locator('[aria-label="Studio sound"]').get_attribute("aria-checked")
+            == "false"
+        )
+        assert (
+            await page.locator('[aria-label="Adaptive audio"]').get_attribute("aria-checked")
+            == "false"
+        )
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_google_meet_refuses_to_unmute_without_configured_microphone() -> None:
+    config = BrowserConfig(automation_mode="simulator")
+    adapter = GoogleMeetAdapter(
+        BrowserController(config),
+        config,
+        microphone_device_name="Missing Virtual Microphone",
+    )
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+
+    with pytest.raises(RuntimeError, match="microphone device is unavailable"):
+        await adapter.join()
 
 
 @pytest.mark.asyncio
