@@ -49,6 +49,37 @@ class SignalBridgeClient(SimulatorBridgeClient):
         )
 
 
+class SerializedCaptureBridgeClient(SignalBridgeClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.active = 0
+        self.max_active = 0
+
+    async def capture_audio_sample(
+        self,
+        bundle_id: str,
+        path: Path,
+        duration_ms: int = 1500,
+    ) -> BridgeResponse:
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        await asyncio.sleep(0.02)
+        try:
+            return await super().capture_audio_sample(bundle_id, path, duration_ms)
+        finally:
+            self.active -= 1
+
+
+class FailedCaptureBridgeClient(SimulatorBridgeClient):
+    async def capture_audio_sample(
+        self,
+        bundle_id: str,
+        path: Path,
+        duration_ms: int = 1500,
+    ) -> BridgeResponse:
+        return BridgeResponse(id="failed", ok=False, error="capture unavailable")
+
+
 @pytest.mark.asyncio
 async def test_simulator_speech_writes_wav(tmp_path: Path) -> None:
     bridge = AudioBridge(AudioConfig(mode="simulator"), tmp_path)
@@ -86,6 +117,24 @@ async def test_streaming_wav_placeholder_sizes_use_actual_payload_duration(tmp_p
     path.write_bytes(content)
 
     assert bridge._wav_duration(path) == pytest.approx(0.18)
+
+
+def test_streaming_wav_header_is_normalized_for_native_playback(tmp_path: Path) -> None:
+    path = tmp_path / "streaming.wav"
+    bridge = AudioBridge(AudioConfig(mode="simulator"), tmp_path)
+    bridge._write_tone_wav(path)
+    content = bytearray(path.read_bytes())
+    content[4:8] = b"\xff\xff\xff\xff"
+    content[40:44] = b"\xff\xff\xff\xff"
+    path.write_bytes(content)
+
+    bridge._normalize_streaming_wav_header(path)
+
+    normalized = path.read_bytes()
+    assert int.from_bytes(normalized[4:8], "little") == len(normalized) - 8
+    assert int.from_bytes(normalized[40:44], "little") == len(normalized) - 44
+    with wave.open(str(path), "rb") as wav:
+        assert wav.getnframes() == int(24_000 * 0.18)
 
 
 @pytest.mark.asyncio
@@ -292,3 +341,51 @@ async def test_audio_input_check_requires_signal_and_transcription(tmp_path: Pat
     assert result["ok"] is True
     assert result["transcript"] == "Audio check heard clearly."
     assert any(event.type == "audio.input.test.passed" for event in runtime.recent_events())
+
+
+@pytest.mark.asyncio
+async def test_runtime_serializes_native_audio_captures(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    settings = Settings(
+        workspace=WorkspaceConfig(root=workspace),
+        database=DatabaseConfig(path=workspace / "robin.db"),
+        audio=AudioConfig(mode="simulator"),
+    )
+    client = SerializedCaptureBridgeClient()
+    runtime = RobinRuntime(settings)
+    runtime.audio = AudioBridge(
+        settings.audio,
+        workspace / "sessions" / "speech",
+        bridge_client=client,
+    )
+
+    await asyncio.gather(
+        runtime.capture_audio_sample(output_name="listener.wav"),
+        runtime.capture_audio_sample(output_name="diagnostic.wav"),
+    )
+
+    assert client.max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_audio_input_check_returns_dashboard_safe_metrics(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    settings = Settings(
+        workspace=WorkspaceConfig(root=workspace),
+        database=DatabaseConfig(path=workspace / "robin.db"),
+        audio=AudioConfig(mode="simulator"),
+    )
+    runtime = RobinRuntime(settings)
+    runtime.audio = AudioBridge(
+        settings.audio,
+        workspace / "sessions" / "speech",
+        bridge_client=FailedCaptureBridgeClient(),
+    )
+
+    result = await runtime.test_audio_input(duration_ms=100)
+
+    assert result["ok"] is False
+    assert result["rms"] == 0.0
+    assert result["peak"] == 0.0
+    assert result["transcript"] == ""
+    assert result["error"] == "capture unavailable"

@@ -9,6 +9,8 @@ runtime:
 
 model:
   primary: gpt-5.6
+  agent_max_iterations: 8
+  agent_max_source_chars: 24000
   intent_confidence_accept: 0.75
   intent_confidence_confirm: 0.60
   intent_timeout_seconds: 4.0
@@ -70,7 +72,7 @@ workspace:
   generated_dir: "generated"
   sessions_dir: "sessions"
   max_file_size_mb: 50
-  allowed_extensions: [".csv", ".xlsx", ".pdf"]
+  allowed_extensions: [".csv", ".xlsx", ".pdf", ".pptx", ".txt", ".md"]
 
 presentation:
   base_url: "http://127.0.0.1:3000/present"

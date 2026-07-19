@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
+import signal
 import sys
 from pathlib import Path
 
@@ -55,14 +57,50 @@ async def main() -> None:
     if settings.audio.bridge_executable is None:
         raise SystemExit("audio.bridge_executable is required for the live audio workflow.")
     output_dir = settings.workspace.root / settings.workspace.sessions_dir / "audio-workflow"
+    output_dir.mkdir(parents=True, exist_ok=True)
     voice = AudioBridge(settings.audio, output_dir, settings.openai_api_key)
-    print(f"1/3 Generating real speech and routing it to {settings.audio.output_device_name}…")
-    record = await voice.speak(
-        "Robin end to end audio check. Speech generation, virtual microphone, and playback are working."
+    ffmpeg_path = shutil.which("ffmpeg")
+    if not ffmpeg_path:
+        raise SystemExit("ffmpeg is required for the BlackHole loopback proof.")
+    loopback_path = output_dir / "blackhole-loopback.wav"
+    loopback_path.unlink(missing_ok=True)
+    print(f"1/4 Generating real speech and proving output through {settings.audio.output_device_name}…")
+    loopback = await asyncio.create_subprocess_exec(
+        ffmpeg_path,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "avfoundation",
+        "-i",
+        f":{settings.audio.output_device_name}",
+        "-ac",
+        "1",
+        "-ar",
+        "24000",
+        str(loopback_path),
     )
+    try:
+        await asyncio.sleep(2.0)
+        record = await voice.speak(
+            "Robin end to end audio check. Speech generation, virtual microphone, and playback are working."
+        )
+        await asyncio.sleep(0.5)
+    finally:
+        if loopback.returncode is None:
+            loopback.send_signal(signal.SIGINT)
+        await loopback.wait()
+    if loopback.returncode not in {0, 255}:
+        raise SystemExit(f"BlackHole loopback recorder failed with exit code {loopback.returncode}.")
     if not record.path or not record.duration_seconds:
         raise SystemExit("Speech generation did not produce a valid WAV.")
     voice_path = output_dir / record.path
+    loopback_transcript = await voice.transcribe_file(loopback_path)
+    if "robin" not in loopback_transcript.lower() or "audio" not in loopback_transcript.lower():
+        raise SystemExit(
+            f"BlackHole loopback transcription was unexpected: {loopback_transcript!r}"
+        )
 
     server, port = await serve_audio(voice_path)
     capture_path = output_dir / "chrome-capture.wav"
@@ -81,7 +119,7 @@ async def main() -> None:
         page = await context.new_page()
         await page.goto(f"http://127.0.0.1:{port}", wait_until="domcontentloaded")
         capture_ms = min(max(int(record.duration_seconds * 1000) + 2_000, 4_000), 15_000)
-        print(f"2/3 Playing the phrase in Chrome and capturing {capture_ms / 1000:.1f}s…")
+        print(f"2/4 Playing the phrase in Chrome and capturing {capture_ms / 1000:.1f}s…")
         capture = asyncio.create_task(
             bridge.capture_audio_sample(
                 settings.audio.capture_bundle_id,
@@ -102,14 +140,16 @@ async def main() -> None:
                 f"threshold={settings.audio.silence_rms_threshold:.6f}"
             )
 
-        print(f"3/3 Transcribing the captured Chrome audio (rms={rms:.4f}, peak={peak:.4f})…")
+        print(f"3/4 Transcribing the captured Chrome audio (rms={rms:.4f}, peak={peak:.4f})…")
         transcript = await voice.transcribe_file(capture_path)
         if "robin" not in transcript.lower() or "audio" not in transcript.lower():
             raise SystemExit(f"Capture transcription was unexpected: {transcript!r}")
+        print("4/4 Both directions passed: Chrome → Robin transcription and Robin → BlackHole speech.")
         print(
             "Live audio workflow passed: "
             f"voice={record.duration_seconds:.2f}s, "
             f"device={record.playback_device}, "
+            f"loopback={loopback_transcript!r}, "
             f"captured={transcript!r}"
         )
     finally:

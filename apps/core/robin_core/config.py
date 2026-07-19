@@ -23,6 +23,8 @@ class RuntimeConfig(BaseModel):
 
 class ModelConfig(BaseModel):
     primary: str = "gpt-5.6"
+    agent_max_iterations: int = 8
+    agent_max_source_chars: int = 24_000
     intent_confidence_accept: float = 0.75
     intent_confidence_confirm: float = 0.60
     intent_timeout_seconds: float = 4.0
@@ -80,7 +82,9 @@ class WorkspaceConfig(BaseModel):
     generated_dir: str = "generated"
     sessions_dir: str = "sessions"
     max_file_size_mb: int = 50
-    allowed_extensions: list[str] = Field(default_factory=lambda: [".csv", ".xlsx", ".pdf"])
+    allowed_extensions: list[str] = Field(
+        default_factory=lambda: [".csv", ".xlsx", ".pdf", ".pptx", ".txt", ".md"]
+    )
 
 
 class PresentationConfig(BaseModel):

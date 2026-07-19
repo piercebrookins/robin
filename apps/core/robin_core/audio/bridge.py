@@ -108,8 +108,10 @@ class AudioBridge:
         )
         content = await _read_binary_response(response)
         path.write_bytes(content)
+        if record.format == "wav":
+            self._normalize_streaming_wav_header(path)
         record.path = path.name
-        record.byte_count = len(content)
+        record.byte_count = path.stat().st_size
 
     async def _transcribe_openai(self, path: Path) -> str:
         if not self.openai_api_key:
@@ -163,6 +165,23 @@ class AudioBridge:
                 return frame_count / wav.getframerate()
         except wave.Error as exc:
             raise ValueError(f"Synthesized WAV is invalid: {exc}") from exc
+
+    @staticmethod
+    def _normalize_streaming_wav_header(path: Path) -> None:
+        """Replace streaming-size sentinels so native audio engines read the PCM correctly."""
+        content = bytearray(path.read_bytes())
+        if len(content) < 44 or content[:4] != b"RIFF" or content[8:12] != b"WAVE":
+            raise ValueError("Synthesized WAV has an invalid RIFF header.")
+        data_marker = content.find(b"data", 12, min(len(content), 4096))
+        if data_marker < 0 or data_marker + 8 > len(content):
+            raise ValueError("Synthesized WAV has no data chunk.")
+        riff_size = len(content) - 8
+        data_size = len(content) - data_marker - 8
+        if riff_size > 0xFFFFFFFF or data_size > 0xFFFFFFFF:
+            raise ValueError("Synthesized WAV is too large for a RIFF container.")
+        content[4:8] = riff_size.to_bytes(4, "little")
+        content[data_marker + 4 : data_marker + 8] = data_size.to_bytes(4, "little")
+        path.write_bytes(content)
 
 
 async def _read_binary_response(response) -> bytes:

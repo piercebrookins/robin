@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from robin_core.config import BrowserConfig
 from robin_core.browser.page_driver import PageDriver, PlaywrightPageDriver, SimulatedPageDriver
@@ -70,6 +71,8 @@ class BrowserController:
                 self._context = contexts[0] if contexts else await self._browser.new_context()
             else:
                 self._context = await self._launch_persistent_context()
+        if name == "presentation":
+            await self._close_stale_presentation_pages(url)
         page = self._matching_context_page(name, url)
         if page is None:
             page = await self._context.new_page()
@@ -77,6 +80,21 @@ class BrowserController:
         if driver.url != url:
             await driver.goto(url, self.config.navigation_timeout_ms)
         return driver
+
+    async def _close_stale_presentation_pages(self, url: str) -> None:
+        """Keep one current renderer tab so Chrome's share picker has one clear source."""
+        if self._context is None:
+            return
+        target = urlsplit(url)
+        presentation_prefix = f"{target.scheme}://{target.netloc}/present/"
+        kept_current = False
+        for page in list(self._context.pages):
+            if page.is_closed() or not page.url.startswith(presentation_prefix):
+                continue
+            if page.url == url and not kept_current:
+                kept_current = True
+                continue
+            await page.close()
 
     def _matching_context_page(self, name: str, url: str):
         if self._context is None:

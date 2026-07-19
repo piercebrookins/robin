@@ -70,6 +70,15 @@ class SimulatedPageDriver:
             self.visible_keys.add("presenting_signal")
         if key == "stop_presenting_button":
             self.visible_keys.discard("stop_presenting_button")
+        if key == "mute_button":
+            self.visible_keys.discard("mute_button")
+            self.visible_keys.add("unmute_button")
+        if key == "unmute_button":
+            self.visible_keys.discard("unmute_button")
+            self.visible_keys.add("mute_button")
+        if key == "prejoin_mute_button":
+            self.visible_keys.discard("mute_button")
+            self.visible_keys.add("unmute_button")
         return key
 
     async def is_visible(self, candidates: list[SelectorCandidate], timeout_ms: int) -> bool:
@@ -118,13 +127,13 @@ class SimulatedPageDriver:
             "prejoin_camera_button": "Turn off camera",
             "join_button": "Join now|Ask to join",
             "leave_button": "Leave call|Leave meeting",
-            "mute_button": "Turn off microphone|Mute microphone|Microphone",
-            "unmute_button": "Turn on microphone|Unmute microphone|Microphone",
+            "mute_button": r"^(?:Turn off microphone|Mute microphone)(?:\b.*)?$",
+            "unmute_button": r"^(?:Turn on microphone|Unmute microphone)(?:\b.*)?$",
             "camera_button": "Turn off camera|Turn on camera|Camera",
             "present_button": "Present now|Share screen|Present",
             "share_tab_option": "A tab|Chrome tab|Share a tab",
-            "stop_presenting_button": "Stop presenting|Stop sharing",
-            "presenting_signal": "You are presenting|Stop presenting|Stop sharing",
+            "stop_presenting_button": r"^(?:Stop presenting|Stop sharing)$",
+            "presenting_signal": r"^(?:Stop presenting|Stop sharing)$",
             "joined_signal": "Leave call|Leave meeting",
         }.items():
             if any(candidate.name_regex == known for candidate in candidates):
@@ -165,8 +174,15 @@ class PlaywrightPageDriver:
         for candidate in candidates:
             try:
                 locator = self._locator(candidate)
-                await locator.first.click(timeout=timeout_ms)
-                return self._describe(candidate)
+                await locator.first.wait_for(state="attached", timeout=timeout_ms)
+                for index in range(await locator.count()):
+                    match = locator.nth(index)
+                    if await match.is_visible():
+                        await match.click(timeout=timeout_ms)
+                        return self._describe(candidate)
+                last_error = TimeoutError(
+                    f"Selector matched no visible elements: {self._describe(candidate)}"
+                )
             except Exception as exc:
                 last_error = exc
         raise TimeoutError(f"No selector candidate was clickable: {last_error}")
@@ -174,9 +190,11 @@ class PlaywrightPageDriver:
     async def is_visible(self, candidates: list[SelectorCandidate], timeout_ms: int) -> bool:
         for candidate in candidates:
             try:
-                locator = self._locator(candidate).first
-                await locator.wait_for(state="visible", timeout=timeout_ms)
-                return True
+                locator = self._locator(candidate)
+                await locator.first.wait_for(state="attached", timeout=timeout_ms)
+                for index in range(await locator.count()):
+                    if await locator.nth(index).is_visible():
+                        return True
             except Exception:
                 continue
         return False

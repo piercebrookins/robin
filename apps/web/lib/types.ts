@@ -48,7 +48,7 @@ export type Artifact = {
   id: string;
   task_id: string;
   revision: number;
-  type: "chart_json" | "chart_png" | "deck_json" | "deck_pptx" | "validation_json";
+  type: "chart_json" | "chart_png" | "deck_json" | "deck_pptx" | "validation_json" | "report_markdown" | "agent_result_json";
   path: string;
   url: string | null;
 };

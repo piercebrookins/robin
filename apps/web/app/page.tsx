@@ -125,11 +125,14 @@ export default function Dashboard() {
     setBusy("Listening for audio test");
     setAudioTestMessage("Speak from another participant or device for the next four seconds…");
     try {
-      const result = await postJson<{ ok: boolean; transcript: string; rms: number }>("/api/audio/test/input");
+      const result = await postJson<{ ok: boolean; transcript?: string; rms?: number; error?: string }>("/api/audio/test/input");
+      const level = Number(result.rms ?? 0);
       setAudioTestMessage(
         result.ok
-          ? `Heard and transcribed: “${result.transcript}”`
-          : `Chrome was quiet (level ${result.rms.toFixed(4)}). Speak from another participant/device, not Robin's own Mac microphone.`,
+          ? `Heard and transcribed: “${result.transcript ?? "speech detected"}”`
+          : result.error
+            ? `Hearing test failed: ${result.error}`
+            : `Chrome was quiet (level ${level.toFixed(4)}). Speak from another participant/device, not Robin's own Mac microphone.`,
       );
       setError(null);
     } catch (err) {
@@ -336,8 +339,11 @@ function eventMessage(event: EventEnvelope) {
     "transcript.final": `Heard: ${String(event.payload.text ?? "speech")}`,
     "task.created": "Accepted a new task",
     "task.started": "Started working",
+    "agent.started": `Planning with ${String(event.payload.model ?? "the general agent")}`,
+    "agent.tool.completed": `Used ${String(event.payload.tool ?? "a workspace tool").replaceAll("_", " ")}`,
+    "agent.deliverable.created": `Built a grounded deliverable from ${String(event.payload.source_count ?? "the selected")} source(s)`,
     "task.validating": "Validating the result",
-    "task.completed": "Analysis and slides are ready",
+    "task.completed": "Verified work and slides are ready",
     "task.failed": "Task failed",
     "artifact.created": `Created ${String(event.payload.type ?? "an artifact").replaceAll("_", " ")}`,
     "speech.completed": `Said: ${String(event.payload.text ?? "status update")}`,

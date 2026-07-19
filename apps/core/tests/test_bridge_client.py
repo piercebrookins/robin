@@ -59,7 +59,9 @@ async def test_process_bridge_client_health_after_swift_build(tmp_path: Path) ->
     assert response.result["played"] == "true"
     if permissions.audio_device_available:
         assert "BlackHole" in response.result["output_device"]
-        assert response.result["route"] == "engine"
+        assert response.result["route"] == "default_device_swap"
+        after_playback = await client.permissions_status()
+        assert after_playback.default_output_device == permissions.default_output_device
 
 
 @pytest.mark.asyncio

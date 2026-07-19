@@ -121,7 +121,7 @@ async def test_cua_driver_retries_and_returns_diagnostics_when_source_is_missing
     tmp_path: Path,
 ) -> None:
     missing_source = picker_tree(share_disabled=True).replace("Robin Presentation", "Unrelated Tab")
-    runner = ScriptedRunner(tmp_path, [missing_source, missing_source])
+    runner = ScriptedRunner(tmp_path, [missing_source, missing_source, missing_source])
     config = BrowserConfig(
         share_dialog_mode="cua_driver",
         recovery_screenshot_dir=tmp_path / "recovery",
@@ -137,7 +137,8 @@ async def test_cua_driver_retries_and_returns_diagnostics_when_source_is_missing
 
     failures = [event for event in error.value.events if event.action == "attempt_failed"]
     assert [event.attempt for event in failures] == [1, 2]
-    assert runner.clicks == []
+    assert [click["element_index"] for click in runner.clicks] == [23]
+    assert any(event.action == "cancel_picker" for event in error.value.events)
     assert (config.recovery_screenshot_dir / "share-dialog-trace.jsonl").exists()
 
 
@@ -163,7 +164,7 @@ async def test_cua_driver_refuses_ambiguous_presentation_titles(tmp_path: Path) 
         "[17] AXRow (Robin Presentation)",
         "[17] AXRow (Robin Presentation)\n[18] AXRow (Robin Presentation)",
     )
-    runner = ScriptedRunner(tmp_path, [ambiguous])
+    runner = ScriptedRunner(tmp_path, [ambiguous, ambiguous])
     config = BrowserConfig(
         share_dialog_mode="cua_driver",
         recovery_screenshot_dir=tmp_path / "recovery",
@@ -174,4 +175,4 @@ async def test_cua_driver_refuses_ambiguous_presentation_titles(tmp_path: Path) 
     with pytest.raises(ShareDialogError, match="ambiguous"):
         await controller.select_and_share("Robin Presentation")
 
-    assert runner.clicks == []
+    assert [click["element_index"] for click in runner.clicks] == [23]

@@ -88,8 +88,9 @@ uv run python scripts/smoke_capture.py --bundle-id com.apple.Safari
 ```
 
 `make smoke-audio-live` is the complete local audio proof. It generates real OpenAI speech,
-routes it to BlackHole 2ch, plays the phrase from Robin's signed-in Chrome, captures Chrome with
-ScreenCaptureKit, and transcribes the result. The hearing check captures audio *coming out of
+records and transcribes that speech directly from BlackHole 2ch, then plays the phrase from
+Robin's signed-in Chrome, captures Chrome with ScreenCaptureKit, and transcribes the result.
+The hearing check captures audio *coming out of
 Chrome*—in a real Meet, speak from another participant or device. Speaking into the same Mac's
 physical microphone is not Chrome output and is therefore not a valid hearing test.
 
@@ -98,12 +99,17 @@ physical microphone is not Chrome output and is therefore not a valid hearing te
 ## Current MVP Scope
 
 - Local FastAPI control plane with persisted runtime, meeting, transcript, task, artifact, and health state.
+- A bounded Responses API tool loop for real tasks: the model selects approved workspace files,
+  reads only those sources through workspace-scoped tools, and submits a cited presentation and
+  Markdown report. The runtime rejects unread or unapproved citations and validates the result
+  before it can be presented. Simulator-only runs retain the deterministic finance fixture worker.
 - Demo-readiness preflight covering workspace files, database writes, disk headroom, internet, dashboard, renderer, browser, audio, and simulator-vs-real prerequisites.
 - Supervisor command that starts core and web, waits for health checks, writes logs, and restarts crashed child processes.
 - Workspace boundary enforcement for CSV, XLSX, and PDF files.
 - Deterministic business-analysis worker that creates chart JSON/PNG, a browser-renderable deck JSON, and a downloadable PPTX export.
 - PDF context extraction for supporting narrative, citations, and validation source lineage while structured CSV/XLSX remains the numeric source of truth.
-- Persisted validation reports for finance analysis, with runtime gating before a deck can become ready to present.
+- Persisted validation reports for both general-agent and simulator finance outputs, with runtime
+  gating before a deck can become ready to present.
 - Revisioned chart, deck, and validation artifacts so spoken follow-ups preserve prior outputs while the presentation route serves the latest successful revision.
 - Dashboard with meeting controls, health, transcript, task queue, artifacts, and emergency stop.
 - Calendar discovery panel for configured local `.ics` or JSON events with Google Meet links.
@@ -157,6 +163,13 @@ The dashboard's audio checks verify Robin's voice output and Chrome capture/tran
 In simulator mode speech is an intentional short tone; real rehearsals must use `audio.mode: openai`
 and `audio.bridge_mode: process`. The live listener rejects silent captures locally before calling
 transcription and times out a stuck native bridge instead of wedging the meeting loop.
+
+Verify two real model-driven tasks through the bounded general-agent path in an isolated copy of
+the approved workspace:
+
+```bash
+make smoke-agent
+```
 
 For real Google Meet control, set `browser.automation_mode` to `playwright`, `browser.connection_mode` to `cdp`, and `browser.share_dialog_mode` to `cua_driver`. Point `browser.executable_path` at Google Chrome, then run `make launch-chrome` and sign in with Robin's pre-provisioned Google account in that dedicated profile. `cua-driver` must be on `PATH`, and CuaDriver.app needs Accessibility and Screen Recording permission. Computer Use is not used for ordinary Meet controls or credentials; it is bounded to Chrome-owned dialogs that Playwright cannot access.
 Then run `ROBIN_REAL_MEET_URL=... make smoke-real-meet` to join, generate a validated deck, present it, stop sharing, and leave.

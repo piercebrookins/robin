@@ -84,6 +84,11 @@ class GoogleMeetAdapter:
     async def join(self) -> None:
         if not self.current_url:
             raise ValueError("No meeting URL has been supplied.")
+        if await self._page().is_visible(MEET_SELECTORS["joined_signal"], 1_000):
+            await self.camera_off()
+            await self.mute()
+            self.state = MeetingState.LISTENING
+            return
         await self.enter_prejoin()
         await self.camera_off()
         await self.mute()
@@ -104,17 +109,33 @@ class GoogleMeetAdapter:
                 )
             except Exception:
                 pass
+        await self.browser.close_page("meet")
+        self.meet_page = None
         self.state = MeetingState.ENDED
         self.presenting = False
 
     async def mute(self) -> None:
-        if self.meet_page and not self.muted:
-            await self._click_with_recovery("mute_button", MEET_SELECTORS["mute_button"], 3_000)
+        if self.meet_page:
+            if await self.meet_page.is_visible(MEET_SELECTORS["mute_button"], 750):
+                await self._click_with_recovery(
+                    "mute_button", MEET_SELECTORS["mute_button"], 3_000
+                )
+            elif not await self.meet_page.is_visible(
+                MEET_SELECTORS["unmute_button"], 750
+            ):
+                raise RuntimeError("Meet microphone control is unavailable; could not mute Robin.")
         self.muted = True
 
     async def unmute(self) -> None:
-        if self.meet_page and self.muted:
-            await self._click_with_recovery("unmute_button", MEET_SELECTORS["unmute_button"], 3_000)
+        if self.meet_page:
+            if await self.meet_page.is_visible(MEET_SELECTORS["unmute_button"], 750):
+                await self._click_with_recovery(
+                    "unmute_button", MEET_SELECTORS["unmute_button"], 3_000
+                )
+            elif not await self.meet_page.is_visible(MEET_SELECTORS["mute_button"], 750):
+                raise RuntimeError(
+                    "Meet microphone control is unavailable; could not unmute Robin."
+                )
         self.muted = False
 
     async def camera_off(self) -> None:

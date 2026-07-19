@@ -19,10 +19,17 @@ class IntentClassifier:
     async def classify(self, text: str, active_tasks: list[RobinTask]) -> MeetingIntent:
         if self.client:
             try:
-                return await asyncio.wait_for(
+                intent = await asyncio.wait_for(
                     self._classify_openai(text, active_tasks),
                     timeout=self.settings.model.intent_timeout_seconds,
                 )
+                local = self._classify_local(text, active_tasks)
+                if (
+                    intent.classification == "non_task"
+                    and local.classification == "conversation_request"
+                ):
+                    return local
+                return intent
             except Exception:
                 return self._classify_local(text, active_tasks)
         return self._classify_local(text, active_tasks)
@@ -32,7 +39,14 @@ class IntentClassifier:
         response = await self.client.responses.create(
             model=self.settings.model.primary,
             input=[
-                {"role": "system", "content": "Classify meeting turns for Robin. Return only JSON."},
+                {
+                    "role": "system",
+                    "content": (
+                        "Classify meeting turns for Robin. Return only JSON matching MeetingIntent. "
+                        "Use conversation_request when Robin is directly addressed with a greeting, "
+                        "voice check, or brief question that is not a task/status/cancel request."
+                    ),
+                },
                 {"role": "user", "content": json.dumps({"turn": text, "active_tasks": active})},
             ],
             text={"format": {"type": "json_object"}},
@@ -56,24 +70,76 @@ class IntentClassifier:
             classification = "task_modification"
         elif addressed and asks_work:
             classification = "direct_request"
+        elif addressed:
+            classification = "conversation_request"
         elif asks_work:
             classification = "possible_task"
         else:
             classification = "non_task"
-        accepted = classification in {"direct_request", "task_modification", "task_cancellation", "status_request"}
+        accepted = classification in {
+            "direct_request",
+            "task_modification",
+            "task_cancellation",
+            "status_request",
+            "conversation_request",
+        }
         confidence = 0.92 if accepted else 0.55 if classification == "possible_task" else 0.2
         return MeetingIntent(
             classification=classification,
             confidence=confidence,
             addressed_to_robin=addressed,
-            task_title=self._title_from_text(text) if accepted else None,
-            requested_outcome=text if accepted else None,
+            task_title=self._title_from_text(text) if classification == "direct_request" else None,
+            requested_outcome=text if classification == "direct_request" else None,
             constraints=self._constraints(text),
             referenced_task_id=ref_id,
             should_acknowledge=accepted,
             should_ask_confirmation=classification == "possible_task",
             clarification_question="Should I take that on?" if classification == "possible_task" else None,
         )
+
+    async def respond(self, text: str, active_tasks: list[RobinTask]) -> str:
+        lowered = text.casefold()
+        if any(
+            phrase in lowered
+            for phrase in ("can you hear me", "do you hear me", "are you listening")
+        ):
+            return "Yes, I can hear you. I’m listening for requests addressed to Robin."
+        if self.client:
+            try:
+                response = await asyncio.wait_for(
+                    self.client.responses.create(
+                        model=self.settings.model.primary,
+                        input=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are Robin, a concise meeting coworker. Answer the directly "
+                                    "addressed question in at most two short sentences. Do not claim to "
+                                    "have performed work or accessed data unless the turn says so."
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": json.dumps(
+                                    {
+                                        "turn": text,
+                                        "active_tasks": [
+                                            {"title": task.title, "status": task.status}
+                                            for task in active_tasks
+                                        ],
+                                    }
+                                ),
+                            },
+                        ],
+                    ),
+                    timeout=self.settings.model.intent_timeout_seconds,
+                )
+                reply = response.output_text.strip()
+                if reply:
+                    return reply
+            except Exception:
+                pass
+        return "I heard you. Ask me to analyze the workspace, prepare slides, or report task status."
 
     def _title_from_text(self, text: str) -> str:
         cleaned = re.sub(r"(?i)\brobin\b[:,]?\s*", "", text).strip()

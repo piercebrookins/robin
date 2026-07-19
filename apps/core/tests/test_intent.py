@@ -24,3 +24,15 @@ async def test_openai_intent_timeout_falls_back_to_local_classifier() -> None:
 
     assert intent.classification == "possible_task"
     assert intent.should_ask_confirmation is True
+
+
+@pytest.mark.asyncio
+async def test_addressed_voice_check_is_a_conversation_request() -> None:
+    classifier = IntentClassifier(Settings())
+
+    intent = await classifier.classify("Robin, can you hear me?", [])
+    reply = await classifier.respond("Robin, can you hear me?", [])
+
+    assert intent.classification == "conversation_request"
+    assert intent.addressed_to_robin is True
+    assert reply.startswith("Yes, I can hear you.")

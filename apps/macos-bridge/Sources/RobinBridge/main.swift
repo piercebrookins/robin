@@ -75,6 +75,11 @@ func audioDeviceAvailable(matching needle: String = "BlackHole") -> Bool {
 }
 
 func defaultOutputDeviceName() -> String {
+    guard let device = defaultOutputDeviceID() else { return "" }
+    return audioDeviceName(device)
+}
+
+func defaultOutputDeviceID() -> AudioDeviceID? {
     var address = AudioObjectPropertyAddress(
         mSelector: kAudioHardwarePropertyDefaultOutputDevice,
         mScope: kAudioObjectPropertyScopeGlobal,
@@ -90,7 +95,24 @@ func defaultOutputDeviceName() -> String {
         &dataSize,
         &device
     )
-    return status == noErr ? audioDeviceName(device) : ""
+    return status == noErr ? device : nil
+}
+
+func setDefaultOutputDevice(_ device: AudioDeviceID) -> OSStatus {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var mutableDevice = device
+    return AudioObjectSetPropertyData(
+        AudioObjectID(kAudioObjectSystemObject),
+        &address,
+        0,
+        nil,
+        UInt32(MemoryLayout<AudioDeviceID>.size),
+        &mutableDevice
+    )
 }
 
 func allAudioDeviceNames() -> [String] {
@@ -133,7 +155,7 @@ func playAudioFile(path: String, outputDevice: String = "BlackHole") -> BridgeRe
     guard FileManager.default.fileExists(atPath: path) else {
         return BridgeResponse(id: "unknown", ok: false, result: ["path": path, "played": "false"], error: "audio file not found")
     }
-    if let routed = playAudioFileWithEngine(path: path, outputDevice: outputDevice) {
+    if let routed = playAudioFileWithDefaultDeviceSwap(path: path, outputDevice: outputDevice) {
         return routed
     }
     do {
@@ -141,7 +163,7 @@ func playAudioFile(path: String, outputDevice: String = "BlackHole") -> BridgeRe
         player.prepareToPlay()
         let played = player.play()
         if played {
-            let until = Date().addingTimeInterval(min(player.duration, 10.0))
+            let until = Date().addingTimeInterval(player.duration + 0.25)
             while player.isPlaying && Date() < until {
                 RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
             }
@@ -163,6 +185,57 @@ func playAudioFile(path: String, outputDevice: String = "BlackHole") -> BridgeRe
     }
 }
 
+func playAudioFileWithDefaultDeviceSwap(path: String, outputDevice: String) -> BridgeResponse? {
+    guard let target = matchingAudioDevice(outputDevice),
+          let previousDevice = defaultOutputDeviceID() else {
+        return nil
+    }
+    let switchStatus = setDefaultOutputDevice(target.id)
+    guard switchStatus == noErr else {
+        return BridgeResponse(
+            id: "unknown",
+            ok: false,
+            result: ["path": path, "played": "false", "output_device": target.name, "route": "default_device_swap"],
+            error: "failed to select default output device: \(switchStatus)"
+        )
+    }
+    defer {
+        _ = setDefaultOutputDevice(previousDevice)
+    }
+    do {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+        let player = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
+        player.prepareToPlay()
+        let played = player.play()
+        if played {
+            let until = Date().addingTimeInterval(player.duration + 0.5)
+            while player.isPlaying && Date() < until {
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return BridgeResponse(
+            id: "unknown",
+            ok: played,
+            result: [
+                "path": path,
+                "played": boolString(played),
+                "duration": String(format: "%.3f", player.duration),
+                "output_device": target.name,
+                "route": "default_device_swap"
+            ],
+            error: played ? nil : "audio playback did not start"
+        )
+    } catch {
+        return BridgeResponse(
+            id: "unknown",
+            ok: false,
+            result: ["path": path, "played": "false", "output_device": target.name, "route": "default_device_swap"],
+            error: "\(error)"
+        )
+    }
+}
+
 func playAudioFileWithEngine(path: String, outputDevice: String) -> BridgeResponse? {
     guard let target = matchingAudioDevice(outputDevice) else {
         return nil
@@ -171,11 +244,10 @@ func playAudioFileWithEngine(path: String, outputDevice: String) -> BridgeRespon
         let file = try AVAudioFile(forReading: URL(fileURLWithPath: path))
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: file.processingFormat)
+        let outputNode = engine.outputNode
         var deviceID = target.id
         let status = AudioUnitSetProperty(
-            engine.outputNode.audioUnit!,
+            outputNode.audioUnit!,
             kAudioOutputUnitProperty_CurrentDevice,
             kAudioUnitScope_Global,
             0,
@@ -190,12 +262,22 @@ func playAudioFileWithEngine(path: String, outputDevice: String) -> BridgeRespon
                 error: "failed to select output device: \(status)"
             )
         }
-        try engine.start()
+        let outputFormat = outputNode.inputFormat(forBus: 0)
+        engine.disconnectNodeOutput(engine.mainMixerNode)
+        engine.connect(engine.mainMixerNode, to: outputNode, format: outputFormat)
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: file.processingFormat)
         player.scheduleFile(file, at: nil)
+        engine.prepare()
+        try engine.start()
+        // Give the newly selected HAL device time to begin rendering before the
+        // player node starts; otherwise BlackHole can accept the graph but drop
+        // the first scheduled buffer during rapid consecutive utterances.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         player.play()
         let duration = Double(file.length) / file.fileFormat.sampleRate
-        let until = Date().addingTimeInterval(min(duration, 10.0))
-        while player.isPlaying && Date() < until {
+        let until = Date().addingTimeInterval(duration + 0.25)
+        while Date() < until {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
         }
         player.stop()

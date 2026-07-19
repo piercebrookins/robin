@@ -1,8 +1,8 @@
 # Robin Product Requirements Document
 
 **Product:** Robin  
-**Version:** 0.1  
-**Status:** Hackathon MVP  
+**Version:** 0.2
+**Status:** Active implementation; real-Meet completion gates not yet satisfied
 **Platform:** Dedicated macOS host  
 **Primary meeting platform:** Google Meet  
 **Document type:** Product Requirements Document  
@@ -17,7 +17,29 @@ Robin runs on its own dedicated Mac, joins Google Meet using its own account, li
 
 Robin is designed to behave like a human employee rather than a private meeting assistant. It has its own meeting identity, microphone, browser session, computer workspace, task queue, voice, and screen-sharing capability.
 
-The hackathon MVP will demonstrate Robin receiving business-analysis requests during a live meeting, reading local CSV, Excel, and PDF files, generating charts and presentation slides, and sharing those results back into the meeting.
+The current implementation targets open-ended, workspace-grounded requests during a live meeting.
+In real partner mode, GPT-5.6 chooses among bounded workspace tools, reads approved CSV,
+Excel, PDF, PowerPoint, Markdown, and text sources, and submits a cited presentation and report.
+Finance-specific deterministic generation remains only as the offline simulator fixture.
+
+### 1.1 Current Evidence and Remaining Product Gaps
+
+Implemented and automated as of July 19, 2026:
+
+- Model-directed workspace listing, source reading, and cited deliverable submission.
+- Runtime enforcement of workspace containment, read-before-cite, iteration limits, and validation.
+- Non-finance customer-feedback and launch-readiness task evaluations.
+- Real API and full-runtime generation of grounded multi-source briefings.
+- Google Meet join/listen/present automation, BlackHole speech routing, loopback audio proof,
+  native screen-share dialog control, persisted events, and live dashboard activity.
+
+Not yet complete and therefore not grounds for calling the product finished:
+
+- Realtime streaming speech-to-speech, reliable speaker attribution, and barge-in.
+- General write/edit tools beyond generated reports and presentations.
+- Model-directed browser/computer tools inside the same general task loop.
+- Human approval gates for consequential external actions and broader prompt-injection evals.
+- Three consecutive fresh-start real Meet rehearsals meeting every completion criterion.
 
 ---
 
@@ -63,9 +85,9 @@ The MVP must demonstrate that Robin can:
 5. Recognize direct requests that mention “Robin.”
 6. Recognize unmistakable implied requests and confirm when intent is uncertain.
 7. Acknowledge accepted work aloud.
-8. Read approved local CSV, Excel, and PDF files.
-9. Generate accurate charts from structured data.
-10. Generate a short slide presentation from its analysis.
+8. Select and read approved local workspace files through bounded tools.
+9. Ground factual claims in sources Robin actually read.
+10. Generate a short cited presentation and report from its analysis.
 11. Continue listening while work is executing.
 12. Accept follow-up instructions that modify active work.
 13. Run a limited number of independent tasks concurrently.

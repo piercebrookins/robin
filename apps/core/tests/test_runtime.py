@@ -95,6 +95,30 @@ async def test_duplicate_join_is_idempotent_and_can_enable_listening(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_addressed_voice_check_gets_an_audible_reply_without_creating_task(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+            audio=AudioConfig(mode="simulator"),
+        )
+    )
+
+    await runtime.ingest_transcript(
+        "Robin, can you hear me?",
+        speaker_name="Meeting audio",
+        source="audio_stt",
+    )
+
+    assert runtime.tasks == []
+    assert runtime.speech[-1].text.startswith("Yes, I can hear you.")
+    assert any(event.type == "conversation.addressed" for event in runtime.recent_events())
+
+
+@pytest.mark.asyncio
 async def test_task_work_starts_without_waiting_for_acknowledgement(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     settings = Settings(
@@ -202,6 +226,78 @@ async def test_stop_presenting_deactivates_presentation_session(tmp_path: Path) 
     assert any("Key metrics:" in speech.text for speech in runtime.speech)
     assert sum(1 for event in runtime.recent_events(200) if event.type == "presentation.narration") >= slide_count
     assert any(event.type == "presentation.stopped" for event in runtime.recent_events())
+
+
+@pytest.mark.asyncio
+async def test_failed_narration_cleans_up_presentation_and_restores_ready_state(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source = workspace / "source-data"
+    source.mkdir(parents=True)
+    (source / "finance.csv").write_text(
+        "year,quarter,scenario,revenue,expenses,operating_income\n"
+        "2024,Q1,actual,100,70,30\n"
+        "2024,Q2,actual,120,80,40\n"
+    )
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+            presentation=PresentationConfig(base_url="http://127.0.0.1:3000/present"),
+        )
+    )
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    await runtime.ingest_transcript("Robin, make a few slides from the finance files.", "Avery")
+    task = runtime.tasks[-1]
+    await runtime._task_handles[task.id]
+
+    async def fail_narration(*_args: object) -> None:
+        raise RuntimeError("narration failed")
+
+    runtime._narrate_deck = fail_narration  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="narration failed"):
+        await runtime.present_task(task.id)
+
+    assert task.status == TaskStatus.READY_TO_PRESENT
+    assert task.error == "narration failed"
+    assert runtime.meet.presenting is False
+    assert runtime.presentations[task.id].active is False
+    assert any(event.type == "presentation.failed" for event in runtime.recent_events())
+    assert any(event.type == "presentation.stopped" for event in runtime.recent_events())
+
+
+@pytest.mark.asyncio
+async def test_leave_meeting_clears_stale_presenting_task_state(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source = workspace / "source-data"
+    source.mkdir(parents=True)
+    (source / "finance.csv").write_text(
+        "year,quarter,scenario,revenue,expenses,operating_income\n"
+        "2024,Q1,actual,100,70,30\n"
+        "2024,Q2,actual,120,80,40\n"
+    )
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+            presentation=PresentationConfig(base_url="http://127.0.0.1:3000/present"),
+        )
+    )
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    await runtime.ingest_transcript("Robin, make a few slides from the finance files.", "Avery")
+    task = runtime.tasks[-1]
+    await runtime._task_handles[task.id]
+    runtime.activate_presentation(task.id)
+    task.status = TaskStatus.PRESENTING
+    runtime.meet.presenting = True
+
+    await runtime.leave_meeting()
+
+    assert task.status == TaskStatus.READY_TO_PRESENT
+    assert runtime.presentations[task.id].active is False
+    assert runtime.meet.presenting is False
 
 
 @pytest.mark.asyncio

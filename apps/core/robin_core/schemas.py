@@ -82,6 +82,7 @@ class MeetingIntent(BaseModel):
         "task_modification",
         "task_cancellation",
         "status_request",
+        "conversation_request",
     ]
     confidence: float
     addressed_to_robin: bool
@@ -196,11 +197,34 @@ class ValidationReport(BaseModel):
     generated_at: datetime = Field(default_factory=now_utc)
 
 
+class AgentDeliverable(BaseModel):
+    title: str
+    summary: str
+    slides: list[SlideSpec]
+    sources: list[SourceCitation]
+
+
+class AgentExecutionResult(BaseModel):
+    deliverable: AgentDeliverable
+    model: str
+    iterations: int
+    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    source_paths: list[str] = Field(default_factory=list)
+
+
 class Artifact(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     task_id: UUID
     revision: int = 1
-    type: Literal["chart_json", "chart_png", "deck_json", "deck_pptx", "validation_json"]
+    type: Literal[
+        "chart_json",
+        "chart_png",
+        "deck_json",
+        "deck_pptx",
+        "validation_json",
+        "report_markdown",
+        "agent_result_json",
+    ]
     path: str
     url: str | None = None
     created_at: datetime = Field(default_factory=now_utc)

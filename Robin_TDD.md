@@ -1,8 +1,8 @@
 # Robin Technical Design Document
 
 **Product:** Robin  
-**Version:** 0.1  
-**Status:** Hackathon MVP Design  
+**Version:** 0.2
+**Status:** Implemented in part; completion audit remains open
 **Platform:** Dedicated macOS host  
 **Primary meeting platform:** Google Meet  
 **Related document:** `Robin_PRD.md`  
@@ -19,11 +19,29 @@ The MVP is a hybrid agent system rather than a pure visual computer-use loop:
 - **GPT-5.6** performs meeting reasoning, intent classification, planning, tool selection, validation, and visual recovery.
 - **Playwright and CDP** perform repeatable Google Meet and browser interactions.
 - **A Swift macOS bridge** captures application audio, routes synthesized speech into Google Meet, and handles native UI surfaces that browser automation cannot access.
-- **Python workers** search files, analyze data, generate charts, and create slide specifications.
+- **A bounded Responses API agent loop** lets GPT-5.6 list and read approved source files,
+  then submit a cited structured deliverable.
+- **Python artifact workers** validate the model result and render Markdown, JSON, and PPTX.
 - **A Next.js web application** provides the operator dashboard and renders presentations that Robin can share.
 - **SQLite** stores local session, transcript, task, artifact, and health state.
 
-Robin runs as a persistent macOS LaunchAgent in a dedicated logged-in user session. The application is fully autonomous after launch on a pre-provisioned Mac.
+Robin runs in a dedicated logged-in macOS session. The one-command local workflow is implemented,
+but full autonomy is not yet proven: realtime barge-in, general computer tools in the agent loop,
+approval gates, and three qualifying real-Meet rehearsals remain open.
+
+### 1.1 Implemented General-Agent Boundary
+
+`GeneralTaskAgent` uses the Responses API function-calling loop and exposes three functions:
+
+1. `list_workspace_files(query)` returns bounded metadata for approved source files.
+2. `read_workspace_file(path)` resolves only indexed paths beneath `source-data/`, extracts
+   bounded structured content, and marks the result as untrusted.
+3. `create_deliverable(...)` submits a 3–8 slide cited result.
+
+The runtime rejects unindexed paths, citations to unread sources, missing citations, missing
+source slides, oversized iteration counts, and structurally invalid deliverables. It persists the
+agent trace and validation evidence alongside the deck, PPTX, and Markdown report. With no API key,
+simulator tests use the old deterministic finance fixture; this is not the real partner-mode path.
 
 ---
 
@@ -70,14 +88,16 @@ Robin does not depend on a private or hidden meeting integration. It joins, mute
 
 ### 3.3 Model Boundary
 
-`gpt-5.6` is the primary reasoning and computer-use model.
+`gpt-5.6` is the primary intent, conversational-response, and general task-agent model.
 
 GPT-5.6 does not directly accept or emit audio in the same request path. The audio pipeline therefore uses specialized OpenAI speech services:
 
-- Realtime transcription model for streaming speech-to-text
-- OpenAI text-to-speech model for voice output
+- `gpt-4o-mini-transcribe` for the current bounded audio transcription windows
+- `gpt-4o-mini-tts` with the `alloy` voice for voice output
 
-This still keeps the agent’s reasoning, decisions, planning, and computer operation centered on GPT-5.6.
+The current model-directed workspace tool loop is implemented. Browser and computer-use actions
+are still orchestrated by deterministic runtime code and recovery policies rather than exposed as
+general-agent tools. Streaming Realtime audio remains a planned replacement for bounded capture.
 
 ### 3.4 Pre-Provisioning
 

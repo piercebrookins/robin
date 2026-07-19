@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from .artifacts import ArtifactWorker
+from .agent import GeneralTaskAgent
 from .audio.bridge import AudioBridge
 from .calendar import calendar_snapshot
 from .config import Settings, load_settings
@@ -45,6 +46,7 @@ class RobinRuntime:
         self.store = Store(self.settings.database.path)
         self.intent = IntentClassifier(self.settings)
         self.artifacts_worker = ArtifactWorker(self.workspace, self.settings.presentation.base_url)
+        self.task_agent = GeneralTaskAgent(self.settings, self.workspace)
         self.browser = BrowserController(self.settings.browser)
         self.meet = GoogleMeetAdapter(self.browser, self.settings.browser)
         self.audio = AudioBridge(
@@ -70,6 +72,7 @@ class RobinRuntime:
         self._listen_handle: asyncio.Task | None = None
         self._join_lock = asyncio.Lock()
         self._speech_lock = asyncio.Lock()
+        self._capture_lock = asyncio.Lock()
         self._speech_handles: set[asyncio.Task] = set()
         self._last_spoken_at_ms = 0
         self._calendar_handle: asyncio.Task | None = None
@@ -391,7 +394,12 @@ class RobinRuntime:
         if "/" in safe_name or ".." in safe_name:
             raise ValueError("output_name must be a simple filename")
         output_path = capture_dir / safe_name
-        response = await self.audio.bridge_client.capture_audio_sample(bundle_id, output_path, duration_ms=duration_ms)
+        async with self._capture_lock:
+            response = await self.audio.bridge_client.capture_audio_sample(
+                bundle_id,
+                output_path,
+                duration_ms=duration_ms,
+            )
         if emit_capture_event:
             await self.emit_event(
                 "audio.capture.sample",
@@ -457,9 +465,16 @@ class RobinRuntime:
             emit_capture_event=False,
         )
         if not result["ok"]:
-            await self.emit_event("audio.input.test.failed", result, component="audio")
+            payload = {
+                **result,
+                "rms": 0.0,
+                "peak": 0.0,
+                "threshold": self.settings.audio.silence_rms_threshold,
+                "transcript": "",
+            }
+            await self.emit_event("audio.input.test.failed", payload, component="audio")
             await self.publish()
-            return result
+            return payload
         metrics = result.get("result", {})
         rms = float(metrics.get("rms", 0.0))
         peak = float(metrics.get("peak", 0.0))
@@ -662,13 +677,31 @@ class RobinRuntime:
         task.status = TaskStatus.PRESENTING
         task.updated_at = now_utc()
         self.store.upsert("task", task)
-        await self.emit_event("presentation.started", {"url": deck.url}, task_id=task.id, component="presentation")
-        await self.meet.start_presenting(deck.url)
-        self.meeting_state = self.meet.state
-        await self._emit_meet_recovery_events(task.id)
-        await self._narrate_deck(task.id, deck_spec)
-        await self.stop_presenting(task.id)
+        await self.emit_event(
+            "presentation.started",
+            {"url": deck.url},
+            task_id=task.id,
+            component="presentation",
+        )
+        try:
+            await self.meet.start_presenting(deck.url)
+            self.meeting_state = self.meet.state
+            await self._emit_meet_recovery_events(task.id)
+            await self._narrate_deck(task.id, deck_spec)
+        except Exception as exc:
+            task.error = str(exc)
+            await self.emit_event(
+                "presentation.failed",
+                {"error": str(exc)},
+                task_id=task.id,
+                component="presentation",
+            )
+            raise
+        finally:
+            if self.meet.presenting or self.presentations[task.id].active:
+                await self.stop_presenting(task.id)
         task.status = TaskStatus.COMPLETED
+        task.error = None
         task.completed_at = now_utc()
         task.updated_at = now_utc()
         self.store.upsert("task", task)
@@ -679,12 +712,31 @@ class RobinRuntime:
         await self.meet.stop_presenting()
         self.meeting_state = self.meet.state
         await self._emit_meet_recovery_events(task_id)
-        target_ids = [task_id] if task_id else list(self.presentations)
+        target_ids = (
+            [task_id]
+            if task_id
+            else list(
+                dict.fromkeys(
+                    [
+                        *self.presentations,
+                        *(task.id for task in self.tasks if task.status == TaskStatus.PRESENTING),
+                    ]
+                )
+            )
+        )
         for current_id in target_ids:
             state = self.presentations.get(current_id)
             if state:
                 state.active = False
                 state.updated_at = now_utc()
+            try:
+                task = self._find_task(current_id)
+            except KeyError:
+                continue
+            if task.status == TaskStatus.PRESENTING:
+                task.status = TaskStatus.READY_TO_PRESENT
+                task.updated_at = now_utc()
+                self.store.upsert("task", task)
         await self.emit_event(
             "presentation.stopped",
             {"task_id": str(task_id) if task_id else None},
@@ -811,6 +863,15 @@ class RobinRuntime:
         elif intent.classification == "status_request":
             summary = self._status_summary()
             await self._acknowledge(summary)
+        elif intent.classification == "conversation_request":
+            await self.emit_event(
+                "conversation.addressed",
+                {"text": segment.text},
+                component="conversation",
+            )
+            await self._acknowledge(
+                await self.intent.respond(segment.text, self._active_tasks())
+            )
         elif intent.should_ask_confirmation and intent.clarification_question:
             task = RobinTask(
                 meeting_id=self.meeting_id,
@@ -965,8 +1026,40 @@ class RobinRuntime:
                 records = self.workspace.index()
                 self.files = records
                 self.store.replace_all("file", records)
-                files = [self.workspace.resolve(record.relative_path) for record in self.workspace.search(task.requested_outcome, records)]
-                artifacts, _chart, _deck, validation = await asyncio.to_thread(self.artifacts_worker.run_finance_analysis, task, files)
+                if self.task_agent.client:
+                    async def report_agent_progress(
+                        event_type: str, payload: dict
+                    ) -> None:
+                        await self.emit_event(
+                            event_type,
+                            payload,
+                            task_id=task.id,
+                            component="general_agent",
+                        )
+                        await self.publish()
+
+                    await self.emit_event(
+                        "agent.started",
+                        {"model": self.settings.model.primary, "file_count": len(records)},
+                        task_id=task.id,
+                        component="general_agent",
+                    )
+                    result = await self.task_agent.execute(
+                        task, records, progress=report_agent_progress
+                    )
+                    artifacts, _deck, validation = await asyncio.to_thread(
+                        self.artifacts_worker.write_agent_result, task, result
+                    )
+                else:
+                    # Simulator/offline tests retain the deterministic fixture worker. Real partner
+                    # mode always has OPENAI_API_KEY and therefore uses the general tool loop above.
+                    files = [
+                        self.workspace.resolve(record.relative_path)
+                        for record in self.workspace.search(task.requested_outcome, records)
+                    ]
+                    artifacts, _chart, _deck, validation = await asyncio.to_thread(
+                        self.artifacts_worker.run_finance_analysis, task, files
+                    )
                 task.status = TaskStatus.VALIDATING
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
