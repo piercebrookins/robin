@@ -36,7 +36,7 @@ eval-operator:
 	uv run python scripts/run_operator_evals.py
 
 eval-operator-live:
-	uv run python scripts/run_operator_evals.py --live-models
+	uv run python scripts/run_operator_evals.py --live-only
 
 smoke:
 	uv run python scripts/smoke_demo.py

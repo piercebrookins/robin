@@ -31,10 +31,16 @@ class MeetingMemoryManager:
                     self._extract_openai(segment, existing),
                     timeout=self.settings.model.intent_timeout_seconds,
                 )
-                return self._parse(payload, segment), list(payload.get("resolve_ids", []))
+                additions = self._parse(payload, segment)
+                resolve_ids = list(payload.get("resolve_ids", []))
+                resolve_ids.extend(
+                    self._infer_resolution_ids(segment, existing, additions)
+                )
+                return additions, list(dict.fromkeys(resolve_ids))
             except Exception:
                 pass
-        return self._extract_local(segment), []
+        additions = self._extract_local(segment)
+        return additions, self._infer_resolution_ids(segment, existing, additions)
 
     async def _extract_openai(
         self,
@@ -140,6 +146,53 @@ class MeetingMemoryManager:
             )
             for kind in dict.fromkeys(kinds)
         ]
+
+    @staticmethod
+    def _infer_resolution_ids(
+        segment: TranscriptSegment,
+        existing: list[MeetingMemoryItem],
+        additions: list[MeetingMemoryItem],
+    ) -> list[str]:
+        """Resolve prior facts only for explicit correction/cancellation language with overlap."""
+        text = " ".join(segment.text.casefold().split())
+        explicit = any(
+            marker in text
+            for marker in (
+                "correction:",
+                "correction,",
+                "cancel that prior",
+                "supersede",
+                "replace that",
+                "instead of",
+                "no longer",
+            )
+        )
+        if not explicit:
+            return []
+        stop = {
+            "that", "this", "with", "from", "have", "will", "prior", "now", "owns",
+            "owner", "ownership", "decision", "correction", "cancel", "replace", "instead",
+            "the", "and", "for", "due", "our", "was", "is", "to", "it",
+        }
+        turn_tokens = {token for token in re.findall(r"[a-z0-9]+", text) if len(token) > 2} - stop
+        addition_kinds = {item.kind for item in additions}
+        resolved: list[str] = []
+        for item in existing:
+            if item.status != "active" or item.meeting_id != segment.meeting_id:
+                continue
+            item_tokens = {
+                token
+                for token in re.findall(r"[a-z0-9]+", item.text.casefold())
+                if len(token) > 2
+            } - stop
+            overlap = item_tokens & turn_tokens
+            same_kind = item.kind in addition_kinds or (
+                item.kind in {"decision", "commitment"}
+                and bool(addition_kinds & {"decision", "commitment", "correction"})
+            )
+            if same_kind and len(overlap) >= 2:
+                resolved.append(str(item.id))
+        return resolved
 
     @staticmethod
     def merge(

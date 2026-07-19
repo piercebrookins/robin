@@ -73,8 +73,15 @@ def main() -> None:
         action="store_true",
         help="Also run API-backed agent, browser, memory, and realtime-audio evaluations.",
     )
+    parser.add_argument(
+        "--live-only",
+        action="store_true",
+        help="Run only API-backed agent, browser, memory, and realtime-audio evaluations.",
+    )
     args = parser.parse_args()
-    commands = DETERMINISTIC + (LIVE_MODELS if args.live_models else [])
+    commands = LIVE_MODELS if args.live_only else DETERMINISTIC + (
+        LIVE_MODELS if args.live_models else []
+    )
     results: list[EvalResult] = []
     for index, (name, command) in enumerate(commands, start=1):
         print(f"[{index}/{len(commands)}] {name}: {' '.join(command)}", flush=True)
@@ -106,7 +113,8 @@ def main() -> None:
                 "schema_version": 1,
                 "created_at": timestamp.isoformat(),
                 "commit": commit,
-                "live_models": args.live_models,
+                "live_models": args.live_models or args.live_only,
+                "live_only": args.live_only,
                 "passed": passed,
                 "results": [asdict(result) for result in results],
                 "limitations": [

@@ -54,6 +54,57 @@ def test_memory_merge_deduplicates_and_resolves_existing_items() -> None:
 
 
 @pytest.mark.asyncio
+async def test_explicit_correction_deterministically_resolves_overlapping_decision() -> None:
+    meeting_id = uuid4()
+    original_turn = TranscriptSegment(
+        meeting_id=meeting_id,
+        speaker_name="Avery",
+        text="We decided Morgan owns the launch checklist and it is due Friday.",
+        started_at_ms=0,
+        ended_at_ms=100,
+    )
+    manager = MeetingMemoryManager(Settings())
+    existing, _ = await manager.extract(original_turn, [])
+    decision = next(item for item in existing if item.kind == "decision")
+    correction = TranscriptSegment(
+        meeting_id=meeting_id,
+        speaker_name="Avery",
+        text="Correction: cancel that prior ownership decision. Taylor now owns the launch checklist, due Monday.",
+        started_at_ms=200,
+        ended_at_ms=300,
+    )
+
+    additions, resolved = await manager.extract(correction, existing)
+    manager.merge(existing, additions, resolved)
+
+    assert str(decision.id) in resolved
+    assert decision.status == "resolved"
+
+
+@pytest.mark.asyncio
+async def test_unrelated_correction_does_not_resolve_existing_decision() -> None:
+    meeting_id = uuid4()
+    decision = MeetingMemoryItem(
+        meeting_id=meeting_id,
+        kind="decision",
+        text="Morgan owns the launch checklist.",
+    )
+    correction = TranscriptSegment(
+        meeting_id=meeting_id,
+        speaker_name="Avery",
+        text="Correction: the catering headcount is twenty people.",
+        started_at_ms=200,
+        ended_at_ms=300,
+    )
+
+    _additions, resolved = await MeetingMemoryManager(Settings()).extract(
+        correction, [decision]
+    )
+
+    assert resolved == []
+
+
+@pytest.mark.asyncio
 async def test_runtime_persists_memory_across_restart(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     settings = Settings(

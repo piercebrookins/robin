@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from pathlib import Path
 
@@ -14,6 +15,15 @@ from robin_core.audio.realtime import RealtimeTranscriber
 from robin_core.config import load_settings
 
 from smoke_audio_workflow import serve_audio
+
+
+def phrase_coverage(expected: str, actual: str) -> float:
+    ignored = {"robin", "is"}
+    expected_words = {
+        word for word in re.findall(r"[a-z0-9]+", expected.casefold()) if word not in ignored
+    }
+    actual_words = set(re.findall(r"[a-z0-9]+", actual.casefold()))
+    return len(expected_words & actual_words) / max(len(expected_words), 1)
 
 
 async def main() -> None:
@@ -83,11 +93,16 @@ async def main() -> None:
         await asyncio.wait_for(completed.wait(), timeout=20)
         transcript = " ".join(finals)
         normalized = transcript.casefold()
-        if "robin" not in normalized or "stream" not in normalized:
-            raise SystemExit(f"Realtime transcript was unexpected: {transcript!r}")
+        coverage = phrase_coverage(phrase, transcript)
+        if coverage < 0.75 or "transcription" not in normalized:
+            raise SystemExit(
+                f"Realtime transcript was unexpected ({coverage:.0%} phrase coverage): "
+                f"{transcript!r}"
+            )
         print("3/4 Realtime listening passed.")
         print(
-            f"Transcript: {transcript!r}; partial events: {len(partials)}; "
+            f"Transcript: {transcript!r}; phrase coverage: {coverage:.0%}; "
+            f"partial events: {len(partials)}; "
             f"model: {settings.audio.realtime_transcription_model}"
         )
         before = await bridge.permissions_status()
