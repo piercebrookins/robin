@@ -150,6 +150,10 @@ physical microphone is not Chrome output and is therefore not a valid hearing te
 - Bounded audio listening loop that captures, transcribes, deduplicates, and ingests meeting audio as transcript segments.
 - Realtime transcription sessions with server VAD and incremental transcript deltas, plus graceful
   barge-in that stops Robin's native playback when another participant begins speaking.
+- Chunk-transfer OpenAI speech streamed as raw 24 kHz PCM into BlackHole, with sub-utterance
+  first-audio evidence, simultaneous WAV audit preservation, interruption, and output-route restore.
+- Best-effort named-speaker enrichment from visible Meet captions merged against realtime STT;
+  unmatched turns remain truthfully labeled `Meeting audio`.
 - Durable, sourced meeting memory for topics, references, decisions, objections, questions,
   commitments, corrections, owners, deadlines, and resolution state. Memory survives restarts and
   is bounded before it is sent back to a model.
@@ -158,6 +162,9 @@ physical microphone is not Chrome output and is therefore not a valid hearing te
   actions, and other consequential controls require an exact action-bound confirmation token.
 - Secret redaction at transcript, event, trace, browser-request, and workspace-context boundaries.
 - Enforced peak-memory and workspace-disk budgets, displayed live in the dashboard.
+- Persisted task outcome states for working, awaiting confirmation, blocked, failed, verified, and
+  cancelled work, with explanatory details visible in the dashboard.
+- Bounded admission waits and one-shot CDP reconnection with cleanup, screenshots, and recovery traces.
 - Meeting leave cleanup that stops the listening loop and presentation state before returning Robin to ready.
 
 ## Operator Evidence and Limitations

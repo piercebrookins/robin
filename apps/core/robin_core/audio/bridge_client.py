@@ -54,6 +54,13 @@ class BridgeClient:
 
     async def play_audio(self, path: Path) -> BridgeResponse: ...
 
+    async def play_pcm_stream(
+        self,
+        chunks: AsyncIterator[bytes],
+        path: Path,
+        sample_rate: int = 24_000,
+    ) -> BridgeResponse: ...
+
     async def interrupt_playback(self) -> bool: ...
 
     async def screen_capture(self, application: str) -> BridgeResponse: ...
@@ -96,6 +103,31 @@ class SimulatorBridgeClient(BridgeClient):
     async def play_audio(self, path: Path) -> BridgeResponse:
         self.played_paths.append(path)
         return BridgeResponse(id=str(uuid4()), ok=True, result={"path": str(path), "played": path.exists()})
+
+    async def play_pcm_stream(
+        self,
+        chunks: AsyncIterator[bytes],
+        path: Path,
+        sample_rate: int = 24_000,
+    ) -> BridgeResponse:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        byte_count = 0
+        with path.open("wb") as stream_file:
+            async for chunk in chunks:
+                stream_file.write(chunk)
+                byte_count += len(chunk)
+        self.played_paths.append(path)
+        return BridgeResponse(
+            id=str(uuid4()),
+            ok=byte_count > 0,
+            result={
+                "path": str(path),
+                "played": byte_count > 0,
+                "bytes": byte_count,
+                "output_device": "simulated BlackHole 2ch",
+                "route": "pcm_stream",
+            },
+        )
 
     async def interrupt_playback(self) -> bool:
         return False
@@ -150,6 +182,59 @@ class ProcessBridgeClient(BridgeClient):
             timeout_seconds=max(15, duration + 8) if duration is not None else 60,
             track_playback=True,
         )
+
+    async def play_pcm_stream(
+        self,
+        chunks: AsyncIterator[bytes],
+        path: Path,
+        sample_rate: int = 24_000,
+    ) -> BridgeResponse:
+        if not self.executable.exists():
+            raise FileNotFoundError(f"Bridge executable not found: {self.executable}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+        done_path = path.with_suffix(path.suffix + ".done")
+        done_path.unlink(missing_ok=True)
+        process = await asyncio.create_subprocess_exec(
+            str(self.executable),
+            "--play-pcm-stream",
+            str(path),
+            str(done_path),
+            self.output_device_name,
+            str(sample_rate),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        self._playback_process = process
+        self._playback_interrupted = False
+        try:
+            with path.open("ab", buffering=0) as stream_file:
+                async for chunk in chunks:
+                    if self._playback_interrupted or process.returncode is not None:
+                        break
+                    if chunk:
+                        stream_file.write(chunk)
+            done_path.touch()
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
+        except asyncio.CancelledError:
+            if process.returncode is None:
+                process.kill()
+                await process.communicate()
+            raise
+        except TimeoutError as exc:
+            if process.returncode is None:
+                process.kill()
+                await process.communicate()
+            raise TimeoutError("macOS bridge PCM stream timed out after 120s") from exc
+        finally:
+            done_path.unlink(missing_ok=True)
+            self._playback_process = None
+        if self._playback_interrupted:
+            self._playback_interrupted = False
+            raise PlaybackInterrupted("Speech playback was interrupted by meeting audio.")
+        if process.returncode != 0:
+            raise RuntimeError(stderr.decode("utf-8") or stdout.decode("utf-8"))
+        return BridgeResponse.model_validate_json(stdout.decode("utf-8"))
 
     async def interrupt_playback(self) -> bool:
         process = self._playback_process

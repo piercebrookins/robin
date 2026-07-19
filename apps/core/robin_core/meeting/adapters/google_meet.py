@@ -54,7 +54,16 @@ class GoogleMeetAdapter:
         if parsed.hostname not in set(self.config.allowed_meet_hosts):
             raise ValueError("Only Google Meet URLs are supported.")
         self.current_url = meeting_url
+        recovery_count = self.browser.recovery_count
         self.meet_page = await self.browser.open_page("meet", meeting_url)
+        if self.browser.recovery_count > recovery_count:
+            self._record_recovery(
+                "cdp_reconnect",
+                self.browser.recovery_count,
+                recovered=True,
+                error=self.browser.last_recovery_reason or "Reconnected to Robin Chrome.",
+                page=self.meet_page,
+            )
         self.state = MeetingState.PREJOIN
 
     async def enter_prejoin(self) -> None:
@@ -88,6 +97,7 @@ class GoogleMeetAdapter:
         if await self._is_admitted():
             await self.camera_off()
             await self.mute()
+            await self.enable_captions()
             self.state = MeetingState.LISTENING
             return
         await self.enter_prejoin()
@@ -96,23 +106,67 @@ class GoogleMeetAdapter:
         await self._click_with_recovery(
             "join_button", MEET_SELECTORS["join_button"], self.config.prejoin_timeout_ms
         )
+        self.state = MeetingState.REQUESTING_ADMISSION
         await self._wait_for_admission()
+        await self.enable_captions()
         self.state = MeetingState.LISTENING
+
+    async def enable_captions(self) -> None:
+        if not self.config.captions_enabled or not self.meet_page:
+            return
+        if await self.meet_page.is_visible(MEET_SELECTORS["disable_captions_button"], 500):
+            return
+        if await self.meet_page.is_visible(MEET_SELECTORS["enable_captions_button"], 500):
+            await self._click_with_recovery(
+                "enable_captions_button",
+                MEET_SELECTORS["enable_captions_button"],
+                2_000,
+            )
+
+    async def recent_captions(self):
+        return await self._page().read_captions()
 
     async def _wait_for_admission(self) -> None:
         deadline = time.monotonic() + self.config.admission_timeout_ms / 1000
         last_text = ""
+        pending_seen = False
         while time.monotonic() < deadline:
-            snapshot = await self._page().inspect()
+            try:
+                snapshot = await asyncio.wait_for(self._page().inspect(), timeout=2.0)
+            except TimeoutError:
+                last_text = "Meet page inspection timed out while waiting for admission."
+                await asyncio.sleep(0.1)
+                continue
             last_text = " ".join(snapshot.text.casefold().split())
             if self._admission_rejected(last_text):
                 raise PermissionError(
                     "Google Meet rejected admission: " + snapshot.text[:300]
                 )
-            if not self._admission_pending(last_text) and await self._is_admitted():
+            if self._admission_pending(last_text):
+                pending_seen = True
+            elif await self._is_admitted():
+                if pending_seen:
+                    self._record_recovery(
+                        "admission_wait",
+                        1,
+                        recovered=True,
+                        error="Robin was admitted after waiting for the host.",
+                        page=self._page(),
+                    )
                 return
             await asyncio.sleep(min(self.config.ui_recovery_pause_ms / 1000, 0.5) or 0.1)
+        screenshot_path = await self._capture_recovery_screenshot(
+            "admission_timeout", 1, self._page()
+        )
         detail = f" Last page text: {last_text[:240]}" if last_text else ""
+        self._record_recovery(
+            "admission_wait",
+            1,
+            recovered=False,
+            error="Robin was not admitted before the configured deadline." + detail,
+            page=self._page(),
+            screenshot_path=screenshot_path,
+        )
         raise TimeoutError(
             "Robin was not admitted to the meeting before the timeout." + detail
         )

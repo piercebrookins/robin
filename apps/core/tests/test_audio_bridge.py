@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -119,6 +120,56 @@ async def test_simulator_speech_writes_wav(tmp_path: Path) -> None:
         assert wav.getframerate() == 24_000
         assert wav.getnchannels() == 1
     assert record.duration_seconds == pytest.approx(0.18)
+
+
+@pytest.mark.asyncio
+async def test_openai_speech_streams_pcm_before_preserving_wav(tmp_path: Path) -> None:
+    class FakeStreamingResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def iter_bytes(self, chunk_size: int):
+            assert chunk_size == 4_800
+            yield b"\x01\x00" * 2_400
+            await asyncio.sleep(0)
+            yield b"\x02\x00" * 2_400
+
+    class FakeStreamingFactory:
+        def create(self, **kwargs):
+            assert kwargs["response_format"] == "pcm"
+            return FakeStreamingResponse()
+
+    audio = AudioBridge(
+        AudioConfig(
+            mode="openai",
+            streaming_speech_enabled=True,
+            streaming_speech_chunk_bytes=4_800,
+        ),
+        tmp_path,
+        openai_api_key="test-key",
+        bridge_client=SimulatorBridgeClient(),
+    )
+    audio.openai_client = SimpleNamespace(
+        audio=SimpleNamespace(
+            speech=SimpleNamespace(
+                with_streaming_response=FakeStreamingFactory()
+            )
+        )
+    )
+
+    record = await audio.speak("Stream this response.")
+
+    assert record.streaming is True
+    assert record.time_to_first_audio_ms is not None
+    assert record.playback_route == "pcm_stream"
+    assert record.path is not None
+    assert not list(tmp_path.glob("*.pcm"))
+    with wave.open(str(tmp_path / record.path), "rb") as wav:
+        assert wav.getframerate() == 24_000
+        assert wav.getnframes() == 4_800
 
 
 @pytest.mark.asyncio

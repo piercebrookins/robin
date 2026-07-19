@@ -33,15 +33,17 @@ Implemented and automated as of July 19, 2026:
 - Google Meet join/listen/present automation, BlackHole speech routing, loopback audio proof,
   native screen-share dialog control, persisted events, and live dashboard activity.
 - Realtime transcription with server VAD, incremental deltas, and interruption-driven playback stop.
+- Streaming PCM speech into BlackHole with first-audio timing, partial WAV audit retention, and route restoration.
+- Meet-caption speaker labels merged with realtime STT when a trustworthy text match exists.
 - Durable sourced meeting memory with correction/resolution semantics and restart persistence.
 - A model-directed semantic browser loop with exact, action-bound approvals for consequential UI.
 - Bounded creation and revision of Markdown, text, JSON, and CSV task outputs in isolated generated directories.
 - Secret redaction, prompt-injection boundaries, bounded model context, and enforced memory/disk budgets.
 - Dashboard views for hearing, speech, beliefs, tool actions, confirmation waits, and resource use.
+- Persisted working, awaiting-confirmation, blocked, failed, verified, and cancelled task outcomes.
 
 Not yet complete and therefore not grounds for calling the product finished:
 
-- Streaming TTS playback (TTS is currently synthesized to a bounded WAV before native playback).
 - Reliable named-speaker attribution when Meet caption metadata is unavailable.
 - Rich-format editing beyond generated text/JSON/CSV, reports, and presentations.
 - Model-directed native computer use beyond the controlled Chrome screen-share picker boundary.
@@ -386,11 +388,12 @@ Robin should sound:
 - Completed
 - Failed
 - Cancelled
-- Awaiting confirmation (for a consequential tool action; currently represented by the browser
-  operation and event stream rather than the core task enum)
-- Blocked (required product state; not yet represented by the core task enum)
-- Verified (required product outcome; artifact validation evidence exists, but this is not yet a
-  distinct core task enum)
+- Awaiting confirmation
+- Blocked
+- Verified
+
+Execution status and outcome state are persisted separately: for example, a task may remain ready
+to present while its live presentation outcome is blocked by admission or a native dialog.
 
 ### 10.6 Workspace and File Access
 

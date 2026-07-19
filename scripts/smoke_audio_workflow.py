@@ -95,6 +95,17 @@ async def main() -> None:
         raise SystemExit(f"BlackHole loopback recorder failed with exit code {loopback.returncode}.")
     if not record.path or not record.duration_seconds:
         raise SystemExit("Speech generation did not produce a valid WAV.")
+    if settings.audio.streaming_speech_enabled:
+        if not record.streaming or record.playback_route != "pcm_stream":
+            raise SystemExit(
+                f"Speech did not use the streaming PCM route: {record.playback_route!r}"
+            )
+        if record.time_to_first_audio_ms is None or record.time_to_first_audio_ms >= int(
+            record.duration_seconds * 1000
+        ):
+            raise SystemExit(
+                "Streaming speech did not begin before the complete utterance duration."
+            )
     voice_path = output_dir / record.path
     loopback_transcript = await voice.transcribe_file(loopback_path)
     if "robin" not in loopback_transcript.lower() or "audio" not in loopback_transcript.lower():
@@ -149,6 +160,8 @@ async def main() -> None:
             "Live audio workflow passed: "
             f"voice={record.duration_seconds:.2f}s, "
             f"device={record.playback_device}, "
+            f"route={record.playback_route}, "
+            f"first_audio={record.time_to_first_audio_ms}ms, "
             f"loopback={loopback_transcript!r}, "
             f"captured={transcript!r}"
         )

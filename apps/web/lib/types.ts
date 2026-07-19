@@ -33,6 +33,8 @@ export type RobinTask = {
   requested_outcome: string;
   constraints: string[];
   error: string | null;
+  outcome_state: "UNVERIFIED" | "WORKING" | "AWAITING_CONFIRMATION" | "BLOCKED" | "FAILED" | "VERIFIED" | "CANCELLED";
+  outcome_detail: string | null;
 };
 
 export type FileIndexRecord = {

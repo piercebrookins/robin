@@ -55,6 +55,7 @@ class BrowserConfig(BaseModel):
     share_dialog_retries: int = 1
     share_dialog_poll_interval_ms: int = 250
     computer_use_command: str = "cua-driver"
+    captions_enabled: bool = True
 
 
 class AudioConfig(BaseModel):
@@ -77,6 +78,9 @@ class AudioConfig(BaseModel):
     realtime_chunk_bytes: int = 2400
     speech_voice: str = "alloy"
     speech_format: str = "wav"
+    streaming_speech_enabled: bool = True
+    streaming_speech_chunk_bytes: int = 4_800
+    streaming_speech_sample_rate: int = 24_000
     output_device_name: str = "BlackHole 2ch"
     post_speech_cooldown_ms: int = 700
     simulator_transcript: str = (

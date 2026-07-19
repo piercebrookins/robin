@@ -27,10 +27,10 @@ The MVP is a hybrid agent system rather than a pure visual computer-use loop:
 
 Robin runs in a dedicated logged-in macOS session. The one-command local workflow, realtime
 transcription/barge-in, durable sourced memory, semantic browser operator, exact approval tokens,
-secret redaction, and resource budgets are implemented. Full autonomy is not yet proven: streamed
-TTS playback, reliable named-speaker attribution, rich-format editing, broader native
-computer tools, explicit blocked/verified task states, and three qualifying real-Meet rehearsals
-remain open.
+secret redaction, resource budgets, streaming PCM speech, caption/STT speaker merging, bounded CDP
+reconnection, and explicit task outcome states are implemented. Full autonomy is not yet proven:
+reliable named-speaker attribution without caption metadata, rich-format editing, broader native
+computer tools, and three qualifying real-Meet rehearsals remain open.
 
 ### 1.1 Implemented General-Agent Boundary
 
@@ -110,8 +110,9 @@ GPT-5.6 does not directly accept or emit audio in the same request path. The aud
 
 The workspace and semantic browser tool loops are implemented. Realtime transcription uses
 `gpt-realtime-whisper` with server VAD and incremental deltas; bounded file transcription remains
-available for diagnostics. TTS currently uses `gpt-4o-mini-tts` and produces a complete WAV before
-the native bridge begins playback, so the streaming-speech target is not yet met.
+available for diagnostics. TTS uses `gpt-4o-mini-tts` chunk-transfer PCM streaming into the native
+bridge. Playback begins on the first chunk while the runtime simultaneously preserves a WAV audit
+artifact; the speech record stores first-audio latency and the verified route.
 
 ### 3.4 Pre-Provisioning
 
@@ -514,9 +515,10 @@ Any non-terminal state:
   -> FAILED
 ```
 
-`awaiting_confirmation` is currently a browser-operation result/event rather than a persisted task
-enum. Artifact validation provides verification evidence, but `BLOCKED` and `VERIFIED` are not yet
-distinct task enum values. They remain required before the state model is complete.
+Task execution status and outcome state are persisted separately. Outcome state is one of
+`UNVERIFIED`, `WORKING`, `AWAITING_CONFIRMATION`, `BLOCKED`, `FAILED`, `VERIFIED`, or `CANCELLED`.
+This lets a validated artifact remain `READY_TO_PRESENT` while a recoverable Meet or dialog problem
+is truthfully shown as `BLOCKED`.
 
 ### 10.4 Speech State
 
@@ -862,7 +864,7 @@ Suppression should not discard other participants who interrupt Robin. During pl
 
 ### 14.1 Speech Generation
 
-`robin-core` sends concise text to the OpenAI speech endpoint and currently requests WAV.
+`robin-core` sends concise text to the OpenAI speech endpoint and requests streaming raw PCM.
 
 Preferred output:
 
@@ -870,8 +872,9 @@ Preferred output:
 24 kHz PCM, mono, 16-bit
 ```
 
-Streaming playback is the target architecture; current playback begins after the complete bounded
-WAV has been synthesized.
+The Swift bridge polls the growing PCM stream, schedules buffers on BlackHole, and restores the
+previous output route after drain or interruption. Python writes the same PCM into a WAV audit
+artifact without delaying first playback.
 
 ### 14.2 Virtual Microphone Routing
 

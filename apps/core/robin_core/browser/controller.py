@@ -28,14 +28,21 @@ class BrowserController:
     _browser: object | None = None
     _context: object | None = None
     _owns_browser: bool = False
+    recovery_count: int = 0
+    last_recovery_reason: str | None = None
 
     async def open_page(self, name: str, url: str) -> PageDriver:
         existing = self.pages.get(name)
         if existing and not existing.is_closed():
-            if existing.url != url:
-                await existing.goto(url, self.config.navigation_timeout_ms)
-            await existing.bring_to_front()
-            return existing
+            try:
+                if existing.url != url:
+                    await existing.goto(url, self.config.navigation_timeout_ms)
+                await existing.bring_to_front()
+                return existing
+            except Exception as exc:
+                if self.config.automation_mode != "playwright" or self.config.connection_mode != "cdp":
+                    raise
+                self._reset_cdp_connection(f"stale page {name}: {exc}")
         self.pages.pop(name, None)
         if self.config.automation_mode == "playwright":
             page = await self._open_playwright_page(name, url)
@@ -128,6 +135,15 @@ class BrowserController:
             self._playwright = None
 
     async def _open_playwright_page(self, name: str, url: str) -> PageDriver:
+        try:
+            return await self._open_playwright_page_once(name, url)
+        except Exception as exc:
+            if self.config.connection_mode != "cdp":
+                raise
+            self._reset_cdp_connection(f"CDP connection failed: {exc}")
+            return await self._open_playwright_page_once(name, url)
+
+    async def _open_playwright_page_once(self, name: str, url: str) -> PageDriver:
         if self._playwright is None:
             from playwright.async_api import async_playwright
 
@@ -153,6 +169,14 @@ class BrowserController:
         if driver.url != url:
             await driver.goto(url, self.config.navigation_timeout_ms)
         return driver
+
+    def _reset_cdp_connection(self, reason: str) -> None:
+        self.pages.clear()
+        self._context = None
+        self._browser = None
+        self._owns_browser = False
+        self.recovery_count += 1
+        self.last_recovery_reason = reason[:1000]
 
     async def _close_stale_presentation_pages(self, url: str) -> None:
         """Keep one current renderer tab so Chrome's share picker has one clear source."""

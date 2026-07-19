@@ -39,6 +39,7 @@ from .schemas import (
     PresentationSession,
     SpeechRecord,
     TaskStatus,
+    TaskOutcomeState,
     TranscriptSegment,
     WorkspaceSnapshot,
     now_utc,
@@ -185,7 +186,7 @@ class RobinRuntime:
                 await self.meet.navigate(meeting_url)
                 self.meeting_state = self.meet.state
                 await self.publish()
-                await self.meet.join()
+                await self._join_meet_with_progress()
                 self.meeting_state = self.meet.state
                 await self._emit_meet_recovery_events()
                 self.runtime_state = RuntimeState.IN_MEETING
@@ -202,6 +203,9 @@ class RobinRuntime:
                     return await self.start_listening_loop()
                 return self.snapshot()
             except Exception as exc:
+                with suppress(Exception):
+                    await self.meet.leave()
+                await self._emit_meet_recovery_events()
                 self.runtime_state = RuntimeState.READY
                 self.meeting_state = MeetingState.IDLE
                 self.meeting_url = None
@@ -212,6 +216,43 @@ class RobinRuntime:
                 )
                 await self.publish()
                 raise
+
+    async def _join_meet_with_progress(self) -> None:
+        handle = asyncio.create_task(self.meet.join())
+        total_timeout = (
+            self.settings.browser.prejoin_timeout_ms
+            + self.settings.browser.admission_timeout_ms
+            + 10_000
+        ) / 1000
+        deadline = time.monotonic() + total_timeout
+        last_state = self.meeting_state
+        try:
+            while True:
+                done, _pending = await asyncio.wait({handle}, timeout=0.2)
+                if self.meet.state != last_state:
+                    last_state = self.meet.state
+                    self.meeting_state = last_state
+                    await self.emit_event(
+                        "meeting.state.changed",
+                        {"state": last_state.value},
+                        component="meeting",
+                    )
+                    await self.publish()
+                if done:
+                    await handle
+                    return
+                if time.monotonic() >= deadline:
+                    handle.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await handle
+                    raise TimeoutError(
+                        f"Meet join exceeded the bounded {total_timeout:.1f}s deadline."
+                    )
+        except asyncio.CancelledError:
+            handle.cancel()
+            with suppress(asyncio.CancelledError):
+                await handle
+            raise
 
     def calendar_snapshot(self) -> CalendarSnapshot:
         snapshot = calendar_snapshot(self.settings.calendar)
@@ -365,6 +406,8 @@ class RobinRuntime:
         for task in self.tasks:
             if task.status not in {TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED}:
                 task.status = TaskStatus.CANCELLED
+                task.outcome_state = TaskOutcomeState.CANCELLED
+                task.outcome_detail = "Cancelled by emergency stop."
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
         await self.audio.stop()
@@ -774,12 +817,13 @@ class RobinRuntime:
             self._last_audio_text = normalized
             self._last_audio_text_at_ms = now_ms
             completed_turns += 1
+            speaker_name, source = await self._caption_attribution(text)
             await self.ingest_transcript(
                 text,
-                speaker_name="Meeting audio",
+                speaker_name=speaker_name,
                 started_at_ms=now_ms,
                 ended_at_ms=now_ms,
-                source="audio_stt",
+                source=source,
             )
 
         async def on_speech_started() -> None:
@@ -844,6 +888,39 @@ class RobinRuntime:
                     return
                 await asyncio.sleep(min(2**failures, 5))
 
+    async def _caption_attribution(self, transcript: str) -> tuple[str, str]:
+        try:
+            captions = await asyncio.wait_for(self.meet.recent_captions(), timeout=0.75)
+        except Exception:
+            return "Meeting audio", "audio_stt"
+        normalized = " ".join(transcript.casefold().split())
+        transcript_tokens = set(normalized.split())
+        best = None
+        best_score = 0.0
+        for caption in captions:
+            caption_text = " ".join(caption.text.casefold().split())
+            caption_tokens = set(caption_text.split())
+            overlap = len(transcript_tokens & caption_tokens) / max(
+                min(len(transcript_tokens), len(caption_tokens)), 1
+            )
+            similarity = SequenceMatcher(None, normalized, caption_text).ratio()
+            score = max(overlap, similarity)
+            if score > best_score:
+                best = caption
+                best_score = score
+        if best is None or best_score < 0.62:
+            return "Meeting audio", "audio_stt"
+        await self.emit_event(
+            "audio.speaker.attributed",
+            {
+                "speaker_name": best.speaker_name,
+                "caption_text": best.text,
+                "match_score": round(best_score, 3),
+            },
+            component="audio",
+        )
+        return best.speaker_name, "merged"
+
     def _is_recent_robin_echo(self, text: str) -> bool:
         spoken = self.audio.last_spoken_text
         if not spoken or int(time.time() * 1000) - self._last_spoken_at_ms > 15_000:
@@ -883,6 +960,8 @@ class RobinRuntime:
         task = self._find_task(task_id)
         task.status = TaskStatus.CANCELLED
         task.updated_at = now_utc()
+        task.outcome_state = TaskOutcomeState.CANCELLED
+        task.outcome_detail = "Cancelled by a meeting participant or operator."
         handle = self._task_handles.get(task_id)
         if handle:
             handle.cancel()
@@ -899,6 +978,8 @@ class RobinRuntime:
         task.revision += 1
         task.status = TaskStatus.ACCEPTED
         task.error = None
+        task.outcome_state = TaskOutcomeState.UNVERIFIED
+        task.outcome_detail = None
         task.started_at = None
         task.completed_at = None
         task.updated_at = now_utc()
@@ -916,6 +997,8 @@ class RobinRuntime:
         deck_spec = self._load_deck(task_id)
         self.activate_presentation(task_id)
         task.status = TaskStatus.PRESENTING
+        task.outcome_state = TaskOutcomeState.WORKING
+        task.outcome_detail = "Presenting the verified artifact and narrating its findings."
         task.updated_at = now_utc()
         self.store.upsert("task", task)
         await self.emit_event(
@@ -931,6 +1014,8 @@ class RobinRuntime:
             await self._narrate_deck(task.id, deck_spec)
         except Exception as exc:
             task.error = str(exc)
+            task.outcome_state = TaskOutcomeState.BLOCKED
+            task.outcome_detail = f"Presentation could not proceed: {exc}"
             await self.emit_event(
                 "presentation.failed",
                 {"error": str(exc)},
@@ -943,6 +1028,8 @@ class RobinRuntime:
                 await self.stop_presenting(task.id)
         task.status = TaskStatus.COMPLETED
         task.error = None
+        task.outcome_state = TaskOutcomeState.VERIFIED
+        task.outcome_detail = "Artifact validation and live presentation completed."
         task.completed_at = now_utc()
         task.updated_at = now_utc()
         self.store.upsert("task", task)
@@ -1111,6 +1198,8 @@ class RobinRuntime:
             task = self._find_task(intent.referenced_task_id)
             task.revision += 1
             task.constraints = sorted(set(task.constraints + intent.constraints + [segment.text]))
+            task.outcome_state = TaskOutcomeState.UNVERIFIED
+            task.outcome_detail = "Revision requested; prior verification no longer covers the updated task."
             task.source_context_segment_ids.append(segment.id)
             task.updated_at = now_utc()
             self.store.upsert("task", task)
@@ -1146,6 +1235,8 @@ class RobinRuntime:
                 title=intent.task_title or segment.text[:80],
                 requester_name=segment.speaker_name,
                 status=TaskStatus.AWAITING_CLARIFICATION,
+                outcome_state=TaskOutcomeState.AWAITING_CONFIRMATION,
+                outcome_detail=intent.clarification_question,
                 request_text=segment.text,
                 requested_outcome=intent.requested_outcome or segment.text,
                 constraints=intent.constraints,
@@ -1179,6 +1270,8 @@ class RobinRuntime:
         task = self._find_task(task_id)
         if is_decline:
             task.status = TaskStatus.CANCELLED
+            task.outcome_state = TaskOutcomeState.CANCELLED
+            task.outcome_detail = "The proposed task was declined."
             task.updated_at = now_utc()
             task.source_context_segment_ids.append(segment.id)
             self.store.upsert("task", task)
@@ -1195,6 +1288,8 @@ class RobinRuntime:
         duplicate = await self._handle_duplicate_task_request(original.text)
         if duplicate:
             task.status = TaskStatus.CANCELLED
+            task.outcome_state = TaskOutcomeState.CANCELLED
+            task.outcome_detail = "A duplicate confirmed task was suppressed."
             task.updated_at = now_utc()
             task.source_context_segment_ids.append(segment.id)
             self.store.upsert("task", task)
@@ -1207,6 +1302,8 @@ class RobinRuntime:
             )
             return True
         task.status = TaskStatus.ACCEPTED
+        task.outcome_state = TaskOutcomeState.UNVERIFIED
+        task.outcome_detail = None
         task.requested_outcome = intent.requested_outcome or original.text
         task.constraints = intent.constraints
         task.updated_at = now_utc()
@@ -1280,6 +1377,8 @@ class RobinRuntime:
         try:
             if self.task_slots.locked():
                 task.status = TaskStatus.QUEUED
+                task.outcome_state = TaskOutcomeState.WORKING
+                task.outcome_detail = "Waiting for an available bounded task slot."
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
                 await self.emit_event("task.queued", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
@@ -1291,6 +1390,8 @@ class RobinRuntime:
                         "Robin resource budget exceeded: " + "; ".join(violations)
                     )
                 task.status = TaskStatus.EXECUTING
+                task.outcome_state = TaskOutcomeState.WORKING
+                task.outcome_detail = "The general agent is inspecting sources and producing the requested output."
                 task.started_at = task.started_at or now_utc()
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
@@ -1338,6 +1439,8 @@ class RobinRuntime:
                         self.artifacts_worker.run_finance_analysis, task, files
                     )
                 task.status = TaskStatus.VALIDATING
+                task.outcome_state = TaskOutcomeState.WORKING
+                task.outcome_detail = "Checking citations, structure, calculations, and artifact readiness."
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
                 await self.emit_event("task.validating", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
@@ -1350,6 +1453,8 @@ class RobinRuntime:
                     failed_checks = [check.name for check in validation.checks if not check.ok]
                     task.status = TaskStatus.FAILED
                     task.error = f"Validation failed: {', '.join(failed_checks)}"
+                    task.outcome_state = TaskOutcomeState.FAILED
+                    task.outcome_detail = task.error
                     task.updated_at = now_utc()
                     self.store.upsert("task", task)
                     await self.emit_event("task.failed", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
@@ -1357,6 +1462,8 @@ class RobinRuntime:
                     await self.publish()
                     return
                 task.status = TaskStatus.READY_TO_PRESENT
+                task.outcome_state = TaskOutcomeState.VERIFIED
+                task.outcome_detail = "Grounding, citations, and artifact validation passed."
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
                 await self.emit_event("task.completed", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
@@ -1364,6 +1471,8 @@ class RobinRuntime:
                 await self._safe_acknowledge("The analysis and slides are ready.")
         except asyncio.CancelledError:
             task.status = TaskStatus.CANCELLED
+            task.outcome_state = TaskOutcomeState.CANCELLED
+            task.outcome_detail = "Execution was cancelled before verification."
             task.updated_at = now_utc()
             self.store.upsert("task", task)
             await self.emit_event("task.cancelled", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
@@ -1371,11 +1480,36 @@ class RobinRuntime:
         except Exception as exc:
             task.status = TaskStatus.FAILED
             task.error = str(exc)
+            if self._is_recoverable_task_blocker(exc):
+                task.outcome_state = TaskOutcomeState.BLOCKED
+                task.outcome_detail = f"Retryable blocker: {exc}"
+            else:
+                task.outcome_state = TaskOutcomeState.FAILED
+                task.outcome_detail = str(exc)
             task.updated_at = now_utc()
             self.store.upsert("task", task)
             await self.emit_event("task.failed", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
             await self.publish()
             await self._safe_acknowledge(self._task_failure_acknowledgement(task))
+
+    @staticmethod
+    def _is_recoverable_task_blocker(exc: Exception) -> bool:
+        if isinstance(exc, (TimeoutError, ConnectionError)):
+            return True
+        text = str(exc).casefold()
+        return any(
+            marker in text
+            for marker in (
+                "resource budget exceeded",
+                "not reachable",
+                "connection",
+                "temporarily unavailable",
+                "timed out",
+                "browser",
+                "renderer",
+                "permission",
+            )
+        )
 
     def _meeting_context(self, meeting_id: UUID | None = None) -> list[TranscriptSegment]:
         target = meeting_id or self.meeting_id

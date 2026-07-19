@@ -91,6 +91,8 @@ p { color: var(--muted); line-height: 1.5; }
 .task-topline > strong { font-size: .88rem; line-height: 1.35; }
 .task-status { color: var(--accent); font-size: .66rem; font-weight: 750; white-space: nowrap; }
 .task-status.failed, .task-error { color: var(--danger); }
+.task-outcome { color: var(--muted); font-size: .72rem; line-height: 1.35; margin: .35rem 0; }
+.task-outcome.failed { color: var(--danger); }
 .task-error { margin: 7px 0; font-size: .78rem; }
 .task-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .task-actions button, .task-actions a { min-height: 32px; font-size: .75rem; }

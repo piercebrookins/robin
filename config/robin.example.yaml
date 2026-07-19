@@ -41,6 +41,9 @@ audio:
   realtime_chunk_bytes: 2400
   speech_voice: "alloy"
   speech_format: "wav"
+  streaming_speech_enabled: true
+  streaming_speech_chunk_bytes: 4800
+  streaming_speech_sample_rate: 24000
   output_device_name: "BlackHole 2ch"
   post_speech_cooldown_ms: 700
   simulator_transcript: "Robin, use the finance files to compare the quarterly results and make slides."
@@ -73,6 +76,7 @@ browser:
   share_dialog_retries: 1
   share_dialog_poll_interval_ms: 250
   computer_use_command: "cua-driver"
+  captions_enabled: true
 
 workspace:
   root: "./RobinWorkspace"

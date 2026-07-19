@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 import wave
 from pathlib import Path
 
@@ -41,14 +42,18 @@ class AudioBridge:
             format=self.config.speech_format,
         )
         try:
-            if self.config.mode == "openai":
+            playback = None
+            if self.config.mode == "openai" and self.config.streaming_speech_enabled:
+                playback = await self._synthesize_and_stream_openai(record)
+            elif self.config.mode == "openai":
                 await self._synthesize_openai(record)
             else:
                 self._synthesize_simulator(record)
-            if record.path and self.output_dir:
+            if playback is None and record.path and self.output_dir:
                 path = self.output_dir / record.path
                 record.duration_seconds = self._wav_duration(path)
                 playback = await self.bridge_client.play_audio(path)
+            if playback is not None:
                 played = playback.result.get("played", False)
                 if not playback.ok or str(played).lower() not in {"true", "1"}:
                     raise RuntimeError(playback.error or "Audio playback did not start.")
@@ -118,6 +123,58 @@ class AudioBridge:
             self._normalize_streaming_wav_header(path)
         record.path = path.name
         record.byte_count = path.stat().st_size
+
+    async def _synthesize_and_stream_openai(self, record: SpeechRecord):
+        if not self.openai_api_key or self.openai_client is None:
+            raise ValueError("OPENAI_API_KEY is required for audio.mode=openai.")
+        path = self._speech_path(record)
+        pcm_path = path.with_suffix(".pcm")
+        started = time.perf_counter()
+        record.streaming = True
+
+        async def chunks():
+            async with self.openai_client.audio.speech.with_streaming_response.create(
+                model=self.config.speech_model,
+                voice=self.config.speech_voice,
+                input=record.text,
+                response_format="pcm",
+            ) as response:
+                async for chunk in response.iter_bytes(
+                    chunk_size=max(self.config.streaming_speech_chunk_bytes, 960)
+                ):
+                    if record.time_to_first_audio_ms is None and chunk:
+                        record.time_to_first_audio_ms = int(
+                            (time.perf_counter() - started) * 1000
+                        )
+                    yield chunk
+
+        try:
+            return await self.bridge_client.play_pcm_stream(
+                chunks(),
+                pcm_path,
+                self.config.streaming_speech_sample_rate,
+            )
+        finally:
+            if pcm_path.exists() and pcm_path.stat().st_size:
+                self._pcm_to_wav(
+                    pcm_path,
+                    path,
+                    self.config.streaming_speech_sample_rate,
+                )
+                record.path = path.name
+                record.byte_count = path.stat().st_size
+                record.duration_seconds = self._wav_duration(path)
+            pcm_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _pcm_to_wav(pcm_path: Path, wav_path: Path, sample_rate: int) -> None:
+        with wave.open(str(wav_path), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(sample_rate)
+            with pcm_path.open("rb") as pcm:
+                while chunk := pcm.read(64 * 1024):
+                    wav.writeframesraw(chunk)
 
     async def _transcribe_openai(self, path: Path) -> str:
         if not self.openai_api_key:

@@ -32,6 +32,12 @@ class PageSnapshot:
     elements: list[InteractiveElement]
 
 
+@dataclass(frozen=True)
+class CaptionTurn:
+    speaker_name: str
+    text: str
+
+
 class PageDriver(Protocol):
     url: str
 
@@ -56,6 +62,8 @@ class PageDriver(Protocol):
 
     async def fill_ref(self, ref: str, text: str) -> InteractiveElement: ...
 
+    async def read_captions(self) -> list[CaptionTurn]: ...
+
     async def bring_to_front(self) -> None: ...
 
     async def close(self) -> None: ...
@@ -76,6 +84,7 @@ class SimulatedPageDriver:
     title: str = "Simulated page"
     operator_elements: dict[str, InteractiveElement] = field(default_factory=dict)
     filled: dict[str, str] = field(default_factory=dict)
+    caption_turns: list[CaptionTurn] = field(default_factory=list)
 
     async def goto(self, url: str, timeout_ms: int) -> None:
         self.url = url
@@ -136,6 +145,9 @@ class SimulatedPageDriver:
         self.filled[ref] = text
         return element
 
+    async def read_captions(self) -> list[CaptionTurn]:
+        return list(self.caption_turns)
+
     def _operator_element(self, ref: str) -> InteractiveElement:
         try:
             return self.operator_elements[ref]
@@ -189,6 +201,8 @@ class SimulatedPageDriver:
             "stop_presenting_button": r"^(?:Stop presenting|Stop sharing)$",
             "presenting_signal": r"^(?:Stop presenting|Stop sharing)$",
             "joined_signal": "Leave call|Leave meeting",
+            "enable_captions_button": "Turn on captions|Show captions|Enable captions",
+            "disable_captions_button": "Turn off captions|Hide captions|Disable captions",
         }.items():
             if any(candidate.name_regex == known for candidate in candidates):
                 return key
@@ -306,6 +320,66 @@ class PlaywrightPageDriver:
             raise RuntimeError(f"Element {ref} is not editable")
         await locator.fill(text)
         return element
+
+    async def read_captions(self) -> list[CaptionTurn]:
+        raw = await self.page.evaluate(
+            r"""
+            () => {
+              const selectors = [
+                '[data-robin-caption]',
+                '[aria-live="polite"]',
+                '[aria-live="assertive"]',
+                '.iTTPOb',
+                '[jsname="tgaKEf"]'
+              ];
+              const nodes = [...new Set(selectors.flatMap(selector => [...document.querySelectorAll(selector)]))];
+              const visible = node => {
+                const style = getComputedStyle(node);
+                const rect = node.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+              };
+              const clean = value => (value || '').replace(/\s+/g, ' ').trim();
+              const ignored = /^(you are presenting|someone joined|someone left|microphone|camera|captions?)$/i;
+              const results = [];
+              for (const node of nodes) {
+                if (!visible(node)) continue;
+                const speakerNode = node.querySelector(
+                  '[data-speaker-name], .zs7s8d, .KcIKyf, [aria-label^="Caption from "]'
+                );
+                const textNode = node.querySelector(
+                  '[data-caption-text], .CNusmb, .ygicle, [jsname="YSxPC"]'
+                );
+                let speaker = clean(
+                  speakerNode?.getAttribute('data-speaker-name') ||
+                  speakerNode?.getAttribute('aria-label')?.replace(/^Caption from\s+/i, '') ||
+                  speakerNode?.textContent
+                );
+                let text = clean(textNode?.textContent);
+                if (!speaker || !text) {
+                  const parts = [...node.children].map(child => clean(child.textContent)).filter(Boolean);
+                  if (parts.length >= 2 && parts[0].length <= 80) {
+                    speaker ||= parts[0];
+                    text ||= parts.slice(1).join(' ');
+                  }
+                }
+                if (speaker && text && !ignored.test(speaker) && speaker !== text && text.length <= 1000) {
+                  results.push({speaker_name: speaker.slice(0, 120), text: text.slice(0, 1000)});
+                }
+              }
+              return results.slice(-12);
+            }
+            """
+        )
+        seen: set[tuple[str, str]] = set()
+        turns: list[CaptionTurn] = []
+        for item in raw:
+            speaker = " ".join(str(item.get("speaker_name", "")).split())[:120]
+            text = " ".join(str(item.get("text", "")).split())[:1000]
+            key = (speaker.casefold(), text.casefold())
+            if speaker and text and key not in seen:
+                seen.add(key)
+                turns.append(CaptionTurn(speaker, text))
+        return turns
 
     def _resolve_operator_ref(self, ref: str):
         if ref not in self._operator_refs or ref not in self._operator_elements:

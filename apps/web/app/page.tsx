@@ -263,6 +263,10 @@ export default function Dashboard() {
                     <strong>{task.title}</strong>
                     <span className={`task-status ${failed ? "failed" : ""}`}>{task.status.replaceAll("_", " ")}</span>
                   </div>
+                  <p className={`task-outcome ${task.outcome_state === "BLOCKED" || task.outcome_state === "FAILED" ? "failed" : ""}`}>
+                    Outcome: {task.outcome_state.replaceAll("_", " ")}
+                    {task.outcome_detail ? ` — ${task.outcome_detail}` : ""}
+                  </p>
                   {task.error && <p className="task-error">{task.error}</p>}
                   <div className="task-actions">
                     {deck?.url && <a href={deck.url} target="_blank" rel="noreferrer"><ExternalLink size={15} /> Open deck</a>}

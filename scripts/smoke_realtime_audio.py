@@ -10,7 +10,7 @@ from playwright.async_api import async_playwright
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "apps" / "core"))
 
 from robin_core.audio.bridge import AudioBridge
-from robin_core.audio.bridge_client import PlaybackInterrupted, ProcessBridgeClient
+from robin_core.audio.bridge_client import ProcessBridgeClient
 from robin_core.audio.realtime import RealtimeTranscriber
 from robin_core.config import load_settings
 
@@ -58,14 +58,14 @@ async def main() -> None:
     )
     partials: list[str] = []
     finals: list[str] = []
-    completed = asyncio.Event()
+    final_received = asyncio.Event()
 
     async def on_partial(_item_id: str, delta: str) -> None:
         partials.append(delta)
 
     async def on_final(_item_id: str, transcript: str) -> None:
         finals.append(transcript)
-        completed.set()
+        final_received.set()
 
     playwright = await async_playwright().start()
     page = None
@@ -90,10 +90,15 @@ async def main() -> None:
         )
         await asyncio.sleep(1)
         await page.locator("#voice").evaluate("audio => audio.play()")
-        await asyncio.wait_for(completed.wait(), timeout=20)
+        await asyncio.wait_for(final_received.wait(), timeout=20)
         transcript = " ".join(finals)
-        normalized = transcript.casefold()
         coverage = phrase_coverage(phrase, transcript)
+        completion_deadline = asyncio.get_running_loop().time() + 8
+        while coverage < 0.75 and asyncio.get_running_loop().time() < completion_deadline:
+            await asyncio.sleep(0.2)
+            transcript = " ".join(finals)
+            coverage = phrase_coverage(phrase, transcript)
+        normalized = transcript.casefold()
         if coverage < 0.75 or "transcription" not in normalized:
             raise SystemExit(
                 f"Realtime transcript was unexpected ({coverage:.0%} phrase coverage): "
@@ -106,16 +111,21 @@ async def main() -> None:
             f"model: {settings.audio.realtime_transcription_model}"
         )
         before = await bridge.permissions_status()
-        playback = asyncio.create_task(bridge.play_audio(output_dir / record.path))
-        await asyncio.sleep(0.5)
-        if not await bridge.interrupt_playback():
-            raise SystemExit("Could not interrupt active speech playback.")
-        try:
-            await playback
-        except PlaybackInterrupted:
-            pass
-        else:
-            raise SystemExit("Interrupted speech playback completed as if uninterrupted.")
+        interruption = asyncio.create_task(
+            voice.speak(
+                "I am explaining this result in detail so a participant has time to interrupt me. "
+                "The explanation continues with supporting evidence and a final recommendation. "
+                "This last sentence should never finish because barge in stops the live stream."
+            )
+        )
+        await asyncio.sleep(1.2)
+        if not await voice.interrupt_speech():
+            raise SystemExit("Could not interrupt active streaming speech playback.")
+        interrupted_record = await interruption
+        if not interrupted_record.interrupted or not interrupted_record.streaming:
+            raise SystemExit(
+                "Interrupted streaming speech completed as if uninterrupted."
+            )
         after = await bridge.permissions_status()
         if after.default_output_device != before.default_output_device:
             raise SystemExit(

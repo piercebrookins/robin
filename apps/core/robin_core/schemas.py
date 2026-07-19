@@ -52,6 +52,16 @@ class TaskStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+class TaskOutcomeState(StrEnum):
+    UNVERIFIED = "UNVERIFIED"
+    WORKING = "WORKING"
+    AWAITING_CONFIRMATION = "AWAITING_CONFIRMATION"
+    BLOCKED = "BLOCKED"
+    FAILED = "FAILED"
+    VERIFIED = "VERIFIED"
+    CANCELLED = "CANCELLED"
+
+
 class HealthItem(BaseModel):
     name: str
     ok: bool
@@ -135,6 +145,8 @@ class RobinTask(BaseModel):
     completed_at: datetime | None = None
     parent_task_id: UUID | None = None
     error: str | None = None
+    outcome_state: TaskOutcomeState = TaskOutcomeState.UNVERIFIED
+    outcome_detail: str | None = None
 
 
 class FileIndexRecord(BaseModel):
@@ -270,6 +282,8 @@ class SpeechRecord(BaseModel):
     completed_at: datetime | None = None
     error: str | None = None
     interrupted: bool = False
+    streaming: bool = False
+    time_to_first_audio_ms: int | None = None
 
 
 class PresentationSession(BaseModel):

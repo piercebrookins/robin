@@ -30,6 +30,13 @@ async def test_simulator_bridge_client_tracks_capture_and_playback(tmp_path: Pat
     sample = await client.capture_audio_sample("com.google.Chrome", tmp_path / "capture.wav")
     stop = await client.stop_capture()
 
+    async def pcm_chunks():
+        yield b"\x01\x00" * 120
+
+    streamed = await client.play_pcm_stream(
+        pcm_chunks(), tmp_path / "speech.pcm", 24_000
+    )
+
     assert permissions.audio_device_available is True
     assert start.result["capturing"] is True
     assert play.result["played"] is True
@@ -37,6 +44,8 @@ async def test_simulator_bridge_client_tracks_capture_and_playback(tmp_path: Pat
     assert sample.ok is True
     assert Path(sample.result["path"]).exists()
     assert stop.result["capturing"] is False
+    assert streamed.ok is True
+    assert streamed.result["route"] == "pcm_stream"
 
 
 @pytest.mark.asyncio

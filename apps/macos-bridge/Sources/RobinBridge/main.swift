@@ -315,6 +315,163 @@ func playAudioFileWithEngine(path: String, outputDevice: String) -> BridgeRespon
     }
 }
 
+final class PCMStreamPlaybackState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var interruptedValue = false
+    private var completedFramesValue: Int64 = 0
+
+    var interrupted: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return interruptedValue
+    }
+
+    var completedFrames: Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return completedFramesValue
+    }
+
+    func interrupt() {
+        lock.lock()
+        interruptedValue = true
+        lock.unlock()
+    }
+
+    func complete(frames: AVAudioFrameCount) {
+        lock.lock()
+        completedFramesValue += Int64(frames)
+        lock.unlock()
+    }
+}
+
+func playPCMStream(
+    path: String,
+    donePath: String,
+    outputDevice: String,
+    sampleRate: Double
+) -> BridgeResponse {
+    guard let target = matchingAudioDevice(outputDevice),
+          let previousDevice = defaultOutputDeviceID() else {
+        return BridgeResponse(
+            id: "stream",
+            ok: false,
+            result: ["played": "false", "route": "pcm_stream"],
+            error: "configured output device is unavailable"
+        )
+    }
+    guard setDefaultOutputDevice(target.id) == noErr else {
+        return BridgeResponse(
+            id: "stream",
+            ok: false,
+            result: ["played": "false", "output_device": target.name, "route": "pcm_stream"],
+            error: "failed to select streaming output device"
+        )
+    }
+    defer { _ = setDefaultOutputDevice(previousDevice) }
+    do {
+        let inputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: sampleRate,
+            channels: 1,
+            interleaved: false
+        )!
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        let state = PCMStreamPlaybackState()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: inputFormat)
+        engine.prepare()
+        try engine.start()
+
+        signal(SIGINT, SIG_IGN)
+        let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        interruptSource.setEventHandler {
+            state.interrupt()
+            player.stop()
+        }
+        interruptSource.resume()
+        defer { interruptSource.cancel() }
+
+        while !FileManager.default.fileExists(atPath: path) && !state.interrupted {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+        let file = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+        defer { try? file.close() }
+        player.play()
+        var totalFrames: Int64 = 0
+        var receivedBytes = 0
+        var firstAudioAt: Date?
+        while !state.interrupted {
+            let data = file.readData(ofLength: 9_600)
+            let evenCount = data.count - (data.count % 2)
+            if evenCount > 0 {
+                let frames = AVAudioFrameCount(evenCount / 2)
+                guard let buffer = AVAudioPCMBuffer(
+                    pcmFormat: inputFormat,
+                    frameCapacity: frames
+                ), let channel = buffer.int16ChannelData?[0] else {
+                    throw NSError(
+                        domain: "RobinBridge",
+                        code: 4,
+                        userInfo: [NSLocalizedDescriptionKey: "could not allocate PCM stream buffer"]
+                    )
+                }
+                buffer.frameLength = frames
+                data.withUnsafeBytes { bytes in
+                    if let base = bytes.baseAddress {
+                        memcpy(channel, base, evenCount)
+                    }
+                }
+                player.scheduleBuffer(
+                    buffer,
+                    completionCallbackType: .dataPlayedBack
+                ) { _ in
+                    state.complete(frames: frames)
+                }
+                totalFrames += Int64(frames)
+                receivedBytes += evenCount
+                firstAudioAt = firstAudioAt ?? Date()
+                continue
+            }
+            if FileManager.default.fileExists(atPath: donePath) {
+                break
+            }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+        let drainDeadline = Date().addingTimeInterval(
+            max(Double(totalFrames - state.completedFrames) / sampleRate + 2.0, 2.0)
+        )
+        while !state.interrupted && state.completedFrames < totalFrames && Date() < drainDeadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+        player.stop()
+        engine.stop()
+        let played = receivedBytes > 0 && !state.interrupted && state.completedFrames >= totalFrames
+        return BridgeResponse(
+            id: "stream",
+            ok: played,
+            result: [
+                "path": path,
+                "played": boolString(played),
+                "bytes": "\(receivedBytes)",
+                "duration": String(format: "%.3f", Double(totalFrames) / sampleRate),
+                "output_device": target.name,
+                "route": "pcm_stream",
+                "first_audio_started": boolString(firstAudioAt != nil)
+            ],
+            error: state.interrupted ? "audio playback interrupted" : (played ? nil : "PCM stream did not drain")
+        )
+    } catch {
+        return BridgeResponse(
+            id: "stream",
+            ok: false,
+            result: ["played": "false", "output_device": target.name, "route": "pcm_stream"],
+            error: "\(error)"
+        )
+    }
+}
+
 func captureScreen(application: String) -> BridgeResponse {
     guard let image = CGDisplayCreateImage(CGMainDisplayID()) else {
         return BridgeResponse(id: "unknown", ok: false, result: ["application": application], error: "screen capture failed")
@@ -632,6 +789,20 @@ func write(_ response: BridgeResponse) throws {
 @main
 struct RobinBridgeMain {
     static func main() async {
+        if let streamIndex = CommandLine.arguments.firstIndex(of: "--play-pcm-stream") {
+            let pathIndex = CommandLine.arguments.index(after: streamIndex)
+            let doneIndex = CommandLine.arguments.index(pathIndex, offsetBy: 1)
+            let deviceIndex = CommandLine.arguments.index(pathIndex, offsetBy: 2)
+            let rateIndex = CommandLine.arguments.index(pathIndex, offsetBy: 3)
+            let path = pathIndex < CommandLine.arguments.endIndex ? CommandLine.arguments[pathIndex] : ""
+            let donePath = doneIndex < CommandLine.arguments.endIndex ? CommandLine.arguments[doneIndex] : ""
+            let device = deviceIndex < CommandLine.arguments.endIndex ? CommandLine.arguments[deviceIndex] : "BlackHole"
+            let rate = rateIndex < CommandLine.arguments.endIndex
+                ? Double(CommandLine.arguments[rateIndex]) ?? 24_000
+                : 24_000
+            try? write(playPCMStream(path: path, donePath: donePath, outputDevice: device, sampleRate: rate))
+            return
+        }
         if let streamIndex = CommandLine.arguments.firstIndex(of: "--stream-audio") {
             let bundleIndex = CommandLine.arguments.index(after: streamIndex)
             let bundleID = bundleIndex < CommandLine.arguments.endIndex

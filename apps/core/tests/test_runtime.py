@@ -7,6 +7,7 @@ from pathlib import Path
 import fitz
 import pytest
 
+from robin_core.browser.page_driver import CaptionTurn, SimulatedPageDriver
 from robin_core.config import (
     AudioConfig,
     DatabaseConfig,
@@ -16,7 +17,13 @@ from robin_core.config import (
     WorkspaceConfig,
 )
 from robin_core.runtime import RobinRuntime
-from robin_core.schemas import MeetingState, RuntimeState, TaskStatus, ValidationReport
+from robin_core.schemas import (
+    MeetingState,
+    RuntimeState,
+    TaskOutcomeState,
+    TaskStatus,
+    ValidationReport,
+)
 
 
 @pytest.mark.asyncio
@@ -48,6 +55,8 @@ async def test_demo_task_generates_deck(tmp_path: Path) -> None:
     handle = runtime._task_handles[task.id]
     await handle
     assert task.status == TaskStatus.READY_TO_PRESENT
+    assert task.outcome_state == TaskOutcomeState.VERIFIED
+    assert "validation passed" in (task.outcome_detail or "").casefold()
     assert any(artifact.type == "deck_json" for artifact in runtime.artifacts)
     deck_artifact = next(artifact for artifact in runtime.artifacts if artifact.task_id == task.id and artifact.type == "deck_json")
     pptx_artifact = next(artifact for artifact in runtime.artifacts if artifact.task_id == task.id and artifact.type == "deck_pptx")
@@ -118,6 +127,53 @@ async def test_duplicate_join_cannot_promote_waiting_room_to_listening(tmp_path:
 
     assert runtime.meeting_state == MeetingState.PREJOIN
     assert runtime._listen_handle is None
+
+
+@pytest.mark.asyncio
+async def test_caption_text_enriches_realtime_speaker_attribution(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+        )
+    )
+    runtime.meet.meet_page = SimulatedPageDriver(
+        caption_turns=[
+            CaptionTurn("Avery", "Robin, summarize the launch risks and open questions.")
+        ]
+    )
+
+    speaker, source = await runtime._caption_attribution(
+        "Robin summarize the launch risks and open questions"
+    )
+
+    assert speaker == "Avery"
+    assert source == "merged"
+    assert any(
+        event.type == "audio.speaker.attributed" for event in runtime.recent_events()
+    )
+
+
+@pytest.mark.asyncio
+async def test_unmatched_caption_does_not_invent_speaker(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+        )
+    )
+    runtime.meet.meet_page = SimulatedPageDriver(
+        caption_turns=[CaptionTurn("Avery", "Completely unrelated discussion")]
+    )
+
+    speaker, source = await runtime._caption_attribution(
+        "Robin create the quarterly briefing"
+    )
+
+    assert speaker == "Meeting audio"
+    assert source == "audio_stt"
 
 
 @pytest.mark.asyncio
@@ -302,6 +358,7 @@ async def test_failed_narration_cleans_up_presentation_and_restores_ready_state(
 
     assert task.status == TaskStatus.READY_TO_PRESENT
     assert task.error == "narration failed"
+    assert task.outcome_state == TaskOutcomeState.BLOCKED
     assert runtime.meet.presenting is False
     assert runtime.presentations[task.id].active is False
     assert any(event.type == "presentation.failed" for event in runtime.recent_events())
@@ -631,6 +688,7 @@ async def test_ambiguous_request_requires_confirmation_before_task(tmp_path: Pat
     assert len(runtime.tasks) == 1
     pending = runtime.tasks[-1]
     assert pending.status == TaskStatus.AWAITING_CLARIFICATION
+    assert pending.outcome_state == TaskOutcomeState.AWAITING_CONFIRMATION
     assert pending.request_text == "Could someone compare the finance files and make slides?"
     assert runtime.speech[-1].text == "Should I take that on?"
     assert any(event.type == "clarification.requested" for event in runtime.recent_events())
@@ -662,6 +720,7 @@ async def test_declined_ambiguous_request_cancels_pending_task(tmp_path: Path) -
 
     assert len(runtime.tasks) == 1
     assert task.status == TaskStatus.CANCELLED
+    assert task.outcome_state == TaskOutcomeState.CANCELLED
     assert task.source_context_segment_ids[-1] == runtime.transcript[-1].id
     assert runtime.speech[-1].text == "Okay, I will leave that alone."
     assert any(event.type == "clarification.declined" for event in runtime.recent_events())
@@ -721,6 +780,7 @@ async def test_validation_failure_blocks_presentation(tmp_path: Path) -> None:
 
     assert task.status == TaskStatus.FAILED
     assert task.error == "Validation failed: operating_margin_formula"
+    assert task.outcome_state == TaskOutcomeState.FAILED
     assert runtime.speech[-1].text == "I found a validation issue in the analysis, so I will not present it yet."
     validation = next(artifact for artifact in runtime.artifacts if artifact.task_id == task.id and artifact.type == "validation_json")
     report = ValidationReport.model_validate_json(runtime.artifact_path(validation.path).read_text())

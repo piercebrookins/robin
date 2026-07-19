@@ -8,7 +8,7 @@ from playwright.async_api import async_playwright
 
 from robin_core.browser.controller import BrowserController
 from robin_core.browser.native_dialog import ShareDialogError, ShareDialogEvent
-from robin_core.browser.page_driver import PlaywrightPageDriver, SimulatedPageDriver
+from robin_core.browser.page_driver import CaptionTurn, PlaywrightPageDriver, SimulatedPageDriver
 from robin_core.config import BrowserConfig
 from robin_core.meeting.adapters.google_meet import GoogleMeetAdapter
 from robin_core.meeting.selectors import MEET_SELECTORS, SelectorCandidate
@@ -51,6 +51,40 @@ async def test_google_meet_microphone_actions_follow_visible_control_state() -> 
     assert page.clicked.count("unmute_button") == 1
     assert page.clicked.count("mute_button") == 1
     assert adapter.muted is True
+
+
+@pytest.mark.asyncio
+async def test_google_meet_enables_captions_after_admission() -> None:
+    config = BrowserConfig(automation_mode="simulator", captions_enabled=True)
+    adapter = GoogleMeetAdapter(BrowserController(config), config)
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    page = adapter.meet_page
+    assert isinstance(page, SimulatedPageDriver)
+    page.visible_keys.add("enable_captions_button")
+
+    await adapter.join()
+
+    assert "enable_captions_button" in page.clicked
+
+
+@pytest.mark.asyncio
+async def test_playwright_driver_reads_visible_speaker_labeled_captions() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(
+            """
+            <div aria-live="polite" data-robin-caption>
+              <div data-speaker-name="Avery">Avery</div>
+              <div data-caption-text>Robin, summarize the launch risks.</div>
+            </div>
+            """
+        )
+
+        captions = await PlaywrightPageDriver(page).read_captions()
+
+        assert captions == [CaptionTurn("Avery", "Robin, summarize the launch risks.")]
+        await browser.close()
 
 
 @pytest.mark.asyncio
@@ -369,6 +403,33 @@ async def test_browser_reuses_named_page_instead_of_opening_duplicate_tabs() -> 
 
     assert second is first
     assert list(browser.pages) == ["meet"]
+
+
+@pytest.mark.asyncio
+async def test_browser_reconnects_once_after_lost_cdp_connection() -> None:
+    class RecoveringController(BrowserController):
+        attempts = 0
+
+        async def _open_playwright_page_once(self, name: str, url: str):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ConnectionError("CDP transport closed")
+            page = SimulatedPageDriver()
+            await page.goto(url, self.config.navigation_timeout_ms)
+            return page
+
+    config = BrowserConfig(
+        automation_mode="playwright",
+        connection_mode="cdp",
+    )
+    browser = RecoveringController(config)
+
+    page = await browser.open_page("meet", "https://meet.google.com/abc-defg-hij")
+
+    assert page.url == "https://meet.google.com/abc-defg-hij"
+    assert browser.attempts == 2
+    assert browser.recovery_count == 1
+    assert "CDP transport closed" in (browser.last_recovery_reason or "")
 
 
 class FaultySimulatedPageDriver(SimulatedPageDriver):
