@@ -50,7 +50,8 @@ simulator tests use the old deterministic finance fixture; this is not the real 
 Generated-file writes reject traversal, source-file mutation, executable extensions, and content
 over 100 KB; audit arguments omit the file body.
 
-Separately, `BrowserOperatorAgent` exposes semantic `inspect`, `click`, `fill`, and `finish` tools.
+Separately, `BrowserOperatorAgent` exposes semantic `inspect`, `click`, `fill`, workspace-scoped
+`upload`, isolated `download`, and `finish` tools.
 Every page is re-inspected after an action. Password input is forbidden, page content is marked
 untrusted, and consequential controls require an exact confirmation token cryptographically bound
 to the current page, action, element reference, field name, and arguments. Native Computer Use is

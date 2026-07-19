@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol
 from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
 from robin_core.meeting.selectors import SelectorCandidate
 
@@ -62,6 +64,10 @@ class PageDriver(Protocol):
 
     async def fill_ref(self, ref: str, text: str) -> InteractiveElement: ...
 
+    async def upload_ref(self, ref: str, path: Path) -> InteractiveElement: ...
+
+    async def download_ref(self, ref: str, destination_dir: Path) -> Path: ...
+
     async def read_captions(self) -> list[CaptionTurn]: ...
 
     async def bring_to_front(self) -> None: ...
@@ -75,7 +81,13 @@ class PageDriver(Protocol):
 class SimulatedPageDriver:
     url: str = "about:blank"
     visible_keys: set[str] = field(
-        default_factory=lambda: {"join_button", "mute_button", "camera_button", "prejoin_mute_button", "prejoin_camera_button"}
+        default_factory=lambda: {
+            "join_button",
+            "mute_button",
+            "camera_button",
+            "prejoin_mute_button",
+            "prejoin_camera_button",
+        }
     )
     clicked: list[str] = field(default_factory=list)
     presentation_error: str | None = None
@@ -84,6 +96,8 @@ class SimulatedPageDriver:
     title: str = "Simulated page"
     operator_elements: dict[str, InteractiveElement] = field(default_factory=dict)
     filled: dict[str, str] = field(default_factory=dict)
+    uploaded: dict[str, str] = field(default_factory=dict)
+    download_names: dict[str, str] = field(default_factory=dict)
     caption_turns: list[CaptionTurn] = field(default_factory=list)
 
     async def goto(self, url: str, timeout_ms: int) -> None:
@@ -144,6 +158,26 @@ class SimulatedPageDriver:
             raise RuntimeError(f"Element {ref} is not editable")
         self.filled[ref] = text
         return element
+
+    async def upload_ref(self, ref: str, path: Path) -> InteractiveElement:
+        element = self._operator_element(ref)
+        if element.kind != "file":
+            raise RuntimeError(f"Element {ref} is not a file input")
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        self.uploaded[ref] = str(path)
+        return element
+
+    async def download_ref(self, ref: str, destination_dir: Path) -> Path:
+        element = self._operator_element(ref)
+        if element.disabled:
+            raise RuntimeError(f"Element {ref} is disabled")
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        filename = Path(self.download_names.get(ref, "download.bin")).name
+        destination = destination_dir / filename
+        destination.write_bytes(b"simulated download")
+        self.clicked.append(ref)
+        return destination
 
     async def read_captions(self) -> list[CaptionTurn]:
         return list(self.caption_turns)
@@ -285,7 +319,7 @@ class PlaywrightPageDriver:
                 continue
             tag = await locator.evaluate("element => element.tagName.toLowerCase()")
             input_type = (await locator.get_attribute("type") or "").casefold()
-            kind = "password" if input_type == "password" else str(tag)
+            kind = input_type if input_type in {"password", "file"} else str(tag)
             if await locator.get_attribute("contenteditable") == "true":
                 kind = "contenteditable"
             name = (
@@ -320,6 +354,30 @@ class PlaywrightPageDriver:
             raise RuntimeError(f"Element {ref} is not editable")
         await locator.fill(text)
         return element
+
+    async def upload_ref(self, ref: str, path: Path) -> InteractiveElement:
+        element, locator = self._resolve_operator_ref(ref)
+        if element.kind != "file":
+            raise RuntimeError(f"Element {ref} is not a file input")
+        await locator.set_input_files(str(path))
+        return element
+
+    async def download_ref(self, ref: str, destination_dir: Path) -> Path:
+        element, locator = self._resolve_operator_ref(ref)
+        if element.disabled:
+            raise RuntimeError(f"Element {ref} is disabled")
+        async with self.page.expect_download() as download_info:
+            await locator.click()
+        download = await download_info.value
+        filename = Path(download.suggested_filename or "download.bin").name
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = destination_dir / filename
+        if destination.exists():
+            destination = (
+                destination_dir / f"{destination.stem}-{uuid4().hex[:8]}{destination.suffix}"
+            )
+        await download.save_as(str(destination))
+        return destination
 
     async def read_captions(self) -> list[CaptionTurn]:
         raw = await self.page.evaluate(

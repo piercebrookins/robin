@@ -36,7 +36,8 @@ Implemented and automated as of July 19, 2026:
 - Streaming PCM speech into BlackHole with first-audio timing, partial WAV audit retention, and route restoration.
 - Meet-caption speaker labels merged with realtime STT when a trustworthy text match exists.
 - Durable sourced meeting memory with correction/resolution semantics and restart persistence.
-- A model-directed semantic browser loop with exact, action-bound approvals for consequential UI.
+- A model-directed semantic browser loop with exact, action-bound approvals for consequential UI,
+  including workspace-scoped uploads and isolated, auditable downloads.
 - Bounded creation and revision of Markdown, text, JSON, and CSV task outputs in isolated generated directories.
 - Secret redaction, prompt-injection boundaries, bounded model context, and enforced memory/disk budgets.
 - Dashboard views for hearing, speech, beliefs, tool actions, confirmation waits, and resource use.

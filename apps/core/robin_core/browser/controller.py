@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from robin_core.config import BrowserConfig
@@ -40,7 +41,10 @@ class BrowserController:
                 await existing.bring_to_front()
                 return existing
             except Exception as exc:
-                if self.config.automation_mode != "playwright" or self.config.connection_mode != "cdp":
+                if (
+                    self.config.automation_mode != "playwright"
+                    or self.config.connection_mode != "cdp"
+                ):
                     raise
                 self._reset_cdp_connection(f"stale page {name}: {exc}")
         self.pages.pop(name, None)
@@ -67,7 +71,9 @@ class BrowserController:
     async def inspect_for_operator(self, name: str) -> PageSnapshot:
         return await self._operator_page(name).inspect()
 
-    async def click_for_operator(self, name: str, ref: str, approved: bool = False) -> InteractiveElement:
+    async def click_for_operator(
+        self, name: str, ref: str, approved: bool = False
+    ) -> InteractiveElement:
         page = self._operator_page(name)
         snapshot = await page.inspect()
         element = next((item for item in snapshot.elements if item.ref == ref), None)
@@ -92,6 +98,34 @@ class BrowserController:
         if self._requires_approval("fill", element) and not approved:
             raise OperatorApprovalRequired("fill", element)
         return await page.fill_ref(ref, text)
+
+    async def upload_for_operator(
+        self, name: str, ref: str, path: Path, approved: bool = False
+    ) -> InteractiveElement:
+        page = self._operator_page(name)
+        element = await self._fresh_element(page, ref)
+        if element.kind != "file":
+            raise RuntimeError(f"Element {ref} is not a file input")
+        if not approved:
+            raise OperatorApprovalRequired("upload", element)
+        return await page.upload_ref(ref, path)
+
+    async def download_for_operator(
+        self, name: str, ref: str, destination_dir: Path, approved: bool = False
+    ) -> Path:
+        page = self._operator_page(name)
+        element = await self._fresh_element(page, ref)
+        if not approved:
+            raise OperatorApprovalRequired("download", element)
+        return await page.download_ref(ref, destination_dir)
+
+    @staticmethod
+    async def _fresh_element(page: PageDriver, ref: str) -> InteractiveElement:
+        snapshot = await page.inspect()
+        element = next((item for item in snapshot.elements if item.ref == ref), None)
+        if element is None:
+            raise KeyError(f"Unknown or stale page element: {ref}")
+        return element
 
     def _operator_page(self, name: str) -> PageDriver:
         page = self.pages.get(name)

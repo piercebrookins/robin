@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from robin_core.browser.controller import BrowserController, OperatorApprovalRequired
 from robin_core.browser.page_driver import InteractiveElement, SimulatedPageDriver
 
 
-def controller_with_page(*elements: InteractiveElement) -> tuple[BrowserController, SimulatedPageDriver]:
+def controller_with_page(
+    *elements: InteractiveElement,
+) -> tuple[BrowserController, SimulatedPageDriver]:
     controller = BrowserController()
     page = SimulatedPageDriver(
         url="https://meet.google.com/test-room",
@@ -69,6 +73,28 @@ async def test_operator_rejects_closed_or_stale_targets() -> None:
         await controller.click_for_operator("meet", "e999")
     with pytest.raises(KeyError, match="not open"):
         await controller.inspect_for_operator("missing")
+
+
+@pytest.mark.asyncio
+async def test_upload_and_download_are_explicitly_approved_and_scoped(tmp_path: Path) -> None:
+    source = tmp_path / "source-data" / "report.pdf"
+    source.parent.mkdir()
+    source.write_bytes(b"report")
+    controller, page = controller_with_page(
+        InteractiveElement("e1", "input", "Attach file", "file"),
+        InteractiveElement("e2", "link", "Export report", "a"),
+    )
+
+    with pytest.raises(OperatorApprovalRequired, match="upload"):
+        await controller.upload_for_operator("meet", "e1", source)
+    await controller.upload_for_operator("meet", "e1", source, approved=True)
+    assert page.uploaded["e1"] == str(source)
+
+    download_dir = tmp_path / "generated" / "browser-downloads"
+    with pytest.raises(OperatorApprovalRequired, match="download"):
+        await controller.download_for_operator("meet", "e2", download_dir)
+    downloaded = await controller.download_for_operator("meet", "e2", download_dir, approved=True)
+    assert downloaded.is_file()
 
 
 @pytest.mark.asyncio

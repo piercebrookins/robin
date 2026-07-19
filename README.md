@@ -158,8 +158,9 @@ physical microphone is not Chrome output and is therefore not a valid hearing te
   commitments, corrections, owners, deadlines, and resolution state. Memory survives restarts and
   is bounded before it is sent back to a model.
 - Approval-gated model browser operator. GPT-5.6 inspects semantic Playwright snapshots and chooses
-  bounded click/fill actions; joins, sends, submissions, sharing, permission changes, destructive
-  actions, and other consequential controls require an exact action-bound confirmation token.
+  bounded click, fill, upload, and download actions. Uploads are restricted to approved workspace
+  source/generated files, downloads are isolated under `generated/browser-downloads`, and all file
+  transfers plus other consequential controls require an exact action-bound confirmation token.
 - Secret redaction at transcript, event, trace, browser-request, and workspace-context boundaries.
 - Enforced peak-memory and workspace-disk budgets, displayed live in the dashboard.
 - Persisted task outcome states for working, awaiting confirmation, blocked, failed, verified, and
