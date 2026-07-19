@@ -6,6 +6,8 @@ runtime:
   speech_floor_silence_ms: 400
   speech_floor_max_wait_ms: 3000
   min_free_disk_mb: 512
+  max_peak_rss_mb: 1024
+  max_workspace_disk_mb: 2048
 
 model:
   primary: gpt-5.6

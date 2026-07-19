@@ -19,6 +19,8 @@ class RuntimeConfig(BaseModel):
     speech_floor_silence_ms: int = 400
     speech_floor_max_wait_ms: int = 3000
     min_free_disk_mb: int = 512
+    max_peak_rss_mb: int = 1024
+    max_workspace_disk_mb: int = 2048
 
 
 class ModelConfig(BaseModel):

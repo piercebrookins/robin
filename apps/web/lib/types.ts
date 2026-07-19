@@ -146,6 +146,8 @@ export type RuntimeMetrics = {
   process_cpu_seconds: number;
   peak_rss_mb: number;
   workspace_disk_mb: number;
+  resource_budget_ok: boolean;
+  resource_budget_violations: string[];
 };
 
 export type PreflightSnapshot = {

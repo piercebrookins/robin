@@ -43,6 +43,7 @@ from .schemas import (
     WorkspaceSnapshot,
     now_utc,
 )
+from .security import redact_text, redact_value
 from .workspace import Workspace
 
 
@@ -379,6 +380,7 @@ class RobinRuntime:
         source: str = "simulator",
     ) -> RuntimeSnapshot:
         now_ms = int(time.time() * 1000)
+        text = redact_text(text)
         segment = TranscriptSegment(
             meeting_id=self.meeting_id,
             speaker_name=speaker_name,
@@ -658,6 +660,7 @@ class RobinRuntime:
         page_name: str = "meet",
         approval_token: str | None = None,
     ) -> BrowserOperatorResult:
+        request = redact_text(request)
         await self.emit_event(
             "browser.operator.started",
             {"request": request[:500], "page": page_name},
@@ -1278,6 +1281,11 @@ class RobinRuntime:
                 await self.emit_event("task.queued", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
                 await self.publish()
             async with self.task_slots:
+                violations = self._resource_budget_violations()
+                if violations:
+                    raise RuntimeError(
+                        "Robin resource budget exceeded: " + "; ".join(violations)
+                    )
                 task.status = TaskStatus.EXECUTING
                 task.started_at = task.started_at or now_utc()
                 task.updated_at = now_utc()
@@ -1502,7 +1510,7 @@ class RobinRuntime:
             meeting_id=self.meeting_id,
             task_id=task_id,
             component=component,
-            payload=payload,
+            payload=redact_value(payload),
         )
         event.id = self.store.append_event_body(event.type, event.model_dump(mode="json"))
         self._write_trace(event)
@@ -1554,6 +1562,10 @@ class RobinRuntime:
             TaskStatus.READY_TO_PRESENT,
             TaskStatus.PRESENTING,
         }
+        violations = self._resource_budget_violations(
+            peak_rss_mb=rss_bytes / 1024 / 1024,
+            workspace_disk_mb=workspace_bytes / 1024 / 1024,
+        )
         return RuntimeMetrics(
             event_count=len(events),
             transcript_count=len(self.transcript),
@@ -1579,7 +1591,39 @@ class RobinRuntime:
             process_cpu_seconds=round(usage.ru_utime + usage.ru_stime, 2),
             peak_rss_mb=round(rss_bytes / 1024 / 1024, 1),
             workspace_disk_mb=round(workspace_bytes / 1024 / 1024, 1),
+            resource_budget_ok=not violations,
+            resource_budget_violations=violations,
         )
+
+    def _resource_budget_violations(
+        self,
+        peak_rss_mb: float | None = None,
+        workspace_disk_mb: float | None = None,
+    ) -> list[str]:
+        if peak_rss_mb is None:
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            rss_bytes = (
+                usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
+            )
+            peak_rss_mb = rss_bytes / 1024 / 1024
+        if workspace_disk_mb is None:
+            workspace_disk_mb = sum(
+                path.stat().st_size
+                for path in self.workspace.root.rglob("*")
+                if path.is_file()
+            ) / 1024 / 1024
+        violations: list[str] = []
+        if peak_rss_mb > self.settings.runtime.max_peak_rss_mb:
+            violations.append(
+                f"peak memory {peak_rss_mb:.1f} MB exceeds "
+                f"{self.settings.runtime.max_peak_rss_mb} MB"
+            )
+        if workspace_disk_mb > self.settings.runtime.max_workspace_disk_mb:
+            violations.append(
+                f"workspace {workspace_disk_mb:.1f} MB exceeds "
+                f"{self.settings.runtime.max_workspace_disk_mb} MB"
+            )
+        return violations
 
     def _write_trace(self, event: EventEnvelope) -> None:
         trace_dir = self.workspace.sessions / "traces"

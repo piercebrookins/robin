@@ -327,6 +327,8 @@ class RuntimeMetrics(BaseModel):
     process_cpu_seconds: float = 0
     peak_rss_mb: float = 0
     workspace_disk_mb: float = 0
+    resource_budget_ok: bool = True
+    resource_budget_violations: list[str] = Field(default_factory=list)
 
 
 class RuntimeSnapshot(BaseModel):

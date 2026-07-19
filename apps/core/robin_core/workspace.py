@@ -7,6 +7,8 @@ import fitz
 import pandas as pd
 from pptx import Presentation
 
+from .security import redact_value
+
 from .config import WorkspaceConfig
 from .schemas import FileIndexRecord
 
@@ -162,7 +164,9 @@ class Workspace:
                     "text": path.read_text(encoding="utf-8", errors="replace"),
                 }
             ]
-        payload = {"path": relative_path, "untrusted_content": True, "sections": sections}
+        payload = redact_value(
+            {"path": relative_path, "untrusted_content": True, "sections": sections}
+        )
         # Bound serialized content so a large workbook or PDF cannot consume the agent context.
         import json
 

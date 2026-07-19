@@ -341,6 +341,7 @@ export default function Dashboard() {
               <Metric label="Recoveries" value={String(metrics?.recovery_event_count ?? 0)} />
               <Metric label="Realtime failures" value={String(metrics?.realtime_failure_count ?? 0)} />
             </div>
+            {metrics && !metrics.resource_budget_ok && <p className="task-error">{metrics.resource_budget_violations.join(" · ")}</p>}
           </section>
           <section className="browser-operator-panel">
             <h2>Model browser operator</h2>
