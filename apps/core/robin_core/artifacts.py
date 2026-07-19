@@ -12,7 +12,18 @@ from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Inches, Pt
 
-from .schemas import Artifact, ChartSeries, ChartSpec, DeckSpec, RobinTask, SlideSpec, SourceCitation, ValidationCheck, ValidationReport
+from .schemas import (
+    AgentExecutionResult,
+    Artifact,
+    ChartSeries,
+    ChartSpec,
+    DeckSpec,
+    RobinTask,
+    SlideSpec,
+    SourceCitation,
+    ValidationCheck,
+    ValidationReport,
+)
 from .workspace import Workspace
 
 
@@ -46,6 +57,122 @@ class ArtifactWorker:
         validation = self._validate_analysis(task, chart, deck, df, source_path, [citation.path for citation in pdf_citations])
         artifacts = self._write_artifacts(task.id, chart, deck, validation)
         return artifacts, chart, deck, validation
+
+    def write_agent_result(
+        self, task: RobinTask, result: AgentExecutionResult
+    ) -> tuple[list[Artifact], DeckSpec, ValidationReport]:
+        deck = DeckSpec(
+            task_id=task.id,
+            revision=task.revision,
+            title=result.deliverable.title,
+            slides=result.deliverable.slides,
+            sources=result.deliverable.sources,
+        )
+        cited = [source.path for source in deck.sources]
+        checks = [
+            ValidationCheck(
+                name="agent_used_workspace_tools",
+                ok=any(call.get("tool") == "read_workspace_file" for call in result.tool_calls),
+                detail="The model inspected source content through the bounded workspace tool.",
+                expected="at least one read_workspace_file call",
+                actual=[call.get("tool") for call in result.tool_calls],
+            ),
+            ValidationCheck(
+                name="citations_grounded_in_read_sources",
+                ok=bool(cited) and set(cited).issubset(result.source_paths),
+                detail="Every cited path was read by the agent during this run.",
+                expected=sorted(cited),
+                actual=sorted(result.source_paths),
+            ),
+            ValidationCheck(
+                name="deck_structure",
+                ok=3 <= len(deck.slides) <= 8
+                and any(slide.type == "sources" for slide in deck.slides),
+                detail="The deck is concise and includes a sources slide.",
+                expected="3-8 slides with sources",
+                actual=f"{len(deck.slides)} slides",
+            ),
+            ValidationCheck(
+                name="deliverable_has_content",
+                ok=bool(result.deliverable.summary.strip())
+                and all(slide.title.strip() for slide in deck.slides),
+                detail="The deliverable contains a summary and titled slides.",
+            ),
+        ]
+        validation = ValidationReport(
+            task_id=task.id,
+            ok=all(check.ok for check in checks),
+            checks=checks,
+            source_paths=result.source_paths,
+        )
+        out = self.workspace.generated_task_dir(str(task.id))
+        revision = task.revision
+        deck_json = out / f"deck_v{revision}.json"
+        deck_pptx = out / f"deck_v{revision}.pptx"
+        report_markdown = out / f"report_v{revision}.md"
+        agent_result_json = out / f"agent_result_v{revision}.json"
+        validation_json = out / f"validation_v{revision}.json"
+        deck_json.write_text(deck.model_dump_json(indent=2))
+        agent_result_json.write_text(result.model_dump_json(indent=2))
+        validation_json.write_text(validation.model_dump_json(indent=2))
+        report_markdown.write_text(self._report_markdown(result))
+        self._render_pptx(deck, None, deck_pptx)
+        artifacts = [
+            Artifact(
+                task_id=task.id,
+                revision=revision,
+                type="deck_json",
+                path=deck_json.relative_to(self.workspace.root).as_posix(),
+                url=f"{self.presentation_base_url}/{task.id}?revision={revision}",
+            ),
+            Artifact(
+                task_id=task.id,
+                revision=revision,
+                type="deck_pptx",
+                path=deck_pptx.relative_to(self.workspace.root).as_posix(),
+            ),
+            Artifact(
+                task_id=task.id,
+                revision=revision,
+                type="report_markdown",
+                path=report_markdown.relative_to(self.workspace.root).as_posix(),
+            ),
+            Artifact(
+                task_id=task.id,
+                revision=revision,
+                type="agent_result_json",
+                path=agent_result_json.relative_to(self.workspace.root).as_posix(),
+            ),
+            Artifact(
+                task_id=task.id,
+                revision=revision,
+                type="validation_json",
+                path=validation_json.relative_to(self.workspace.root).as_posix(),
+            ),
+        ]
+        artifacts.extend(
+            Artifact(
+                task_id=task.id,
+                revision=revision,
+                type="generated_file",
+                path=path,
+            )
+            for path in result.generated_paths
+        )
+        return artifacts, deck, validation
+
+    def _report_markdown(self, result: AgentExecutionResult) -> str:
+        lines = [f"# {result.deliverable.title}", "", result.deliverable.summary, ""]
+        for slide in result.deliverable.slides:
+            lines.extend([f"## {slide.title}", ""])
+            lines.extend(f"- {item}" for item in slide.body)
+            lines.extend(f"- **{label}:** {value}" for label, value in slide.metrics.items())
+            lines.append("")
+        lines.extend(["## Source files", ""])
+        lines.extend(
+            f"- `{source.path}` — {source.note}" for source in result.deliverable.sources
+        )
+        return "\n".join(lines).rstrip() + "\n"
 
     def _choose_table(self, paths: list[Path]) -> Path:
         csvs = [path for path in paths if path.suffix.lower() == ".csv"]
@@ -305,7 +432,7 @@ class ArtifactWorker:
             Artifact(task_id=task_id, revision=revision, type="validation_json", path=validation_json.relative_to(self.workspace.root).as_posix()),
         ]
 
-    def _render_pptx(self, deck: DeckSpec, chart_png: Path, path: Path) -> None:
+    def _render_pptx(self, deck: DeckSpec, chart_png: Path | None, path: Path) -> None:
         prs = Presentation()
         prs.slide_width = Inches(13.333)
         prs.slide_height = Inches(7.5)
@@ -316,6 +443,8 @@ class ArtifactWorker:
                 self._add_text_block(slide, slide_spec.body, left=0.8, top=2.1, width=11.8, height=3.8, font_size=28)
             elif slide_spec.type == "chart":
                 try:
+                    if chart_png is None:
+                        raise ValueError("No chart image was supplied")
                     slide.shapes.add_picture(str(chart_png), Inches(0.8), Inches(1.35), width=Inches(11.8), height=Inches(5.4))
                     self._add_text_block(slide, slide_spec.body[:1], left=0.8, top=6.85, width=11.8, height=0.35, font_size=12)
                 except Exception:

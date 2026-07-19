@@ -6,42 +6,59 @@ runtime:
   speech_floor_silence_ms: 400
   speech_floor_max_wait_ms: 3000
   min_free_disk_mb: 512
+  max_peak_rss_mb: 1024
+  max_workspace_disk_mb: 2048
 
 model:
   primary: gpt-5.6
+  agent_max_iterations: 8
+  agent_max_source_chars: 24000
   intent_confidence_accept: 0.75
   intent_confidence_confirm: 0.60
   intent_timeout_seconds: 4.0
 
 audio:
-  mode: "simulator"
-  bridge_mode: "simulator"
+  mode: "openai"
+  bridge_mode: "process"
   # For native bridge mode after `swift build --package-path apps/macos-bridge`:
   # bridge_mode: "process"
   # bridge_executable: "./apps/macos-bridge/.build/debug/robin-macos-bridge"
-  bridge_executable: null
+  bridge_executable: "./apps/macos-bridge/.build/debug/robin-macos-bridge"
   capture_bundle_id: "com.google.Chrome"
-  capture_sample_duration_ms: 1500
-  capture_loop_interval_ms: 500
+  # Longer windows plus a local RMS gate avoid uploading silent clips.
+  capture_sample_duration_ms: 4000
+  capture_loop_interval_ms: 250
+  silence_rms_threshold: 0.002
+  openai_timeout_seconds: 20
+  openai_max_retries: 1
   speech_model: "gpt-4o-mini-tts"
   transcription_model: "gpt-4o-mini-transcribe"
+  realtime_transcription_enabled: true
+  realtime_transcription_model: "gpt-realtime-whisper"
+  realtime_transcription_delay: "low"
+  realtime_vad_silence_ms: 550
+  realtime_vad_min_speech_ms: 180
+  realtime_chunk_bytes: 2400
   speech_voice: "alloy"
   speech_format: "wav"
+  streaming_speech_enabled: true
+  streaming_speech_chunk_bytes: 4800
+  streaming_speech_sample_rate: 24000
   output_device_name: "BlackHole 2ch"
   post_speech_cooldown_ms: 700
   simulator_transcript: "Robin, use the finance files to compare the quarterly results and make slides."
 
 browser:
   meet_base_url: "https://meet.google.com"
-  automation_mode: "simulator"
-  connection_mode: "launch"
+  automation_mode: "playwright"
+  connection_mode: "cdp"
   cdp_endpoint: "http://127.0.0.1:9222"
   allowed_meet_hosts: ["meet.google.com"]
   # For real Google Meet control:
   # automation_mode: "playwright"
   # connection_mode: "cdp"
   # executable_path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-  executable_path: null
+  executable_path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   profile_dir: "~/Library/Application Support/Robin/Chrome"
   recovery_screenshot_dir: "./RobinWorkspace/sessions/browser-recovery"
   headless: false
@@ -53,12 +70,13 @@ browser:
   ui_action_retries: 1
   ui_recovery_pause_ms: 250
   # Real Meet mode uses Codex/macOS Computer Use only for Chrome-owned dialogs.
-  share_dialog_mode: "simulator"
+  share_dialog_mode: "cua_driver"
   share_source_title: "Robin Presentation"
   share_dialog_timeout_ms: 10000
   share_dialog_retries: 1
   share_dialog_poll_interval_ms: 250
   computer_use_command: "cua-driver"
+  captions_enabled: true
 
 workspace:
   root: "./RobinWorkspace"
@@ -66,7 +84,7 @@ workspace:
   generated_dir: "generated"
   sessions_dir: "sessions"
   max_file_size_mb: 50
-  allowed_extensions: [".csv", ".xlsx", ".pdf"]
+  allowed_extensions: [".csv", ".xlsx", ".pdf", ".pptx", ".txt", ".md"]
 
 presentation:
   base_url: "http://127.0.0.1:3000/present"

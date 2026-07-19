@@ -12,6 +12,17 @@ export type TranscriptSegment = {
   created_at: string;
 };
 
+export type MeetingMemoryItem = {
+  id: string;
+  kind: "topic" | "reference" | "decision" | "objection" | "question" | "commitment" | "correction";
+  text: string;
+  speaker_name: string | null;
+  owner: string | null;
+  deadline: string | null;
+  status: "active" | "resolved" | "superseded" | "cancelled";
+  source_segment_ids: string[];
+};
+
 export type RobinTask = {
   id: string;
   title: string;
@@ -22,6 +33,8 @@ export type RobinTask = {
   requested_outcome: string;
   constraints: string[];
   error: string | null;
+  outcome_state: "UNVERIFIED" | "WORKING" | "AWAITING_CONFIRMATION" | "BLOCKED" | "FAILED" | "VERIFIED" | "CANCELLED";
+  outcome_detail: string | null;
 };
 
 export type FileIndexRecord = {
@@ -48,7 +61,7 @@ export type Artifact = {
   id: string;
   task_id: string;
   revision: number;
-  type: "chart_json" | "chart_png" | "deck_json" | "deck_pptx" | "validation_json";
+  type: "chart_json" | "chart_png" | "deck_json" | "deck_pptx" | "validation_json" | "report_markdown" | "agent_result_json";
   path: string;
   url: string | null;
 };
@@ -79,9 +92,13 @@ export type SpeechRecord = {
   format: string;
   path: string | null;
   byte_count: number;
+  duration_seconds: number | null;
+  playback_device: string | null;
+  playback_route: string | null;
   started_at: string;
   completed_at: string | null;
   error: string | null;
+  interrupted: boolean;
 };
 
 export type RuntimeSnapshot = {
@@ -95,6 +112,7 @@ export type RuntimeSnapshot = {
   calendar_auto_join_running: boolean;
   health: HealthItem[];
   transcript: TranscriptSegment[];
+  meeting_memory: MeetingMemoryItem[];
   tasks: RobinTask[];
   artifacts: Artifact[];
   speech: SpeechRecord[];
@@ -123,6 +141,15 @@ export type RuntimeMetrics = {
   presentation_count: number;
   audio_capture_event_count: number;
   direct_request_count: number;
+  agent_tool_call_count: number;
+  recovery_event_count: number;
+  realtime_failure_count: number;
+  uptime_seconds: number;
+  process_cpu_seconds: number;
+  peak_rss_mb: number;
+  workspace_disk_mb: number;
+  resource_budget_ok: boolean;
+  resource_budget_violations: string[];
 };
 
 export type PreflightSnapshot = {
@@ -155,6 +182,31 @@ export type AudioCaptureResult = {
   path: string;
   result: Record<string, unknown>;
   error: string | null;
+};
+
+export type BrowserOperatorResult = {
+  status: "completed" | "awaiting_confirmation";
+  summary: string;
+  tool_calls: Array<Record<string, unknown>>;
+  approval_token: string | null;
+  approval_description: string | null;
+};
+
+export type RehearsalEvidence = {
+  id: string;
+  created_at: string;
+  runtime_instance_id: string;
+  meeting_id: string;
+  task_id: string;
+  run_number: number;
+  consecutive_passes: number;
+  participant_name: string;
+  notes: string;
+  confirmations: Record<string, boolean>;
+  automated_checks: Record<string, boolean>;
+  passed: boolean;
+  commit: string | null;
+  evidence_path: string | null;
 };
 
 export type PresentationSession = {

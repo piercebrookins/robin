@@ -1,8 +1,8 @@
 # Robin Product Requirements Document
 
 **Product:** Robin  
-**Version:** 0.1  
-**Status:** Hackathon MVP  
+**Version:** 0.2
+**Status:** Active implementation; real-Meet completion gates not yet satisfied
 **Platform:** Dedicated macOS host  
 **Primary meeting platform:** Google Meet  
 **Document type:** Product Requirements Document  
@@ -17,7 +17,43 @@ Robin runs on its own dedicated Mac, joins Google Meet using its own account, li
 
 Robin is designed to behave like a human employee rather than a private meeting assistant. It has its own meeting identity, microphone, browser session, computer workspace, task queue, voice, and screen-sharing capability.
 
-The hackathon MVP will demonstrate Robin receiving business-analysis requests during a live meeting, reading local CSV, Excel, and PDF files, generating charts and presentation slides, and sharing those results back into the meeting.
+The current implementation targets open-ended, workspace-grounded requests during a live meeting.
+In real partner mode, GPT-5.6 chooses among bounded workspace tools, reads approved CSV,
+Excel, PDF, PowerPoint, Markdown, and text sources, and submits a cited presentation and report.
+Finance-specific deterministic generation remains only as the offline simulator fixture.
+
+### 1.1 Current Evidence and Remaining Product Gaps
+
+Implemented and automated as of July 19, 2026:
+
+- Model-directed workspace listing, source reading, and cited deliverable submission.
+- Runtime enforcement of workspace containment, read-before-cite, iteration limits, and validation.
+- Non-finance customer-feedback and launch-readiness task evaluations.
+- Real API and full-runtime generation of grounded multi-source briefings.
+- Google Meet join/listen/present automation, BlackHole speech routing, loopback audio proof,
+  native screen-share dialog control, persisted events, and live dashboard activity.
+- Realtime transcription with server VAD, incremental deltas, and interruption-driven playback stop.
+- Streaming PCM speech into BlackHole with first-audio timing, partial WAV audit retention, and route restoration.
+- Meet-caption speaker labels merged with realtime STT when a trustworthy text match exists.
+- Durable sourced meeting memory with correction/resolution semantics and restart persistence.
+- A model-directed semantic browser loop with exact, action-bound approvals for consequential UI,
+  including workspace-scoped uploads and isolated, auditable downloads.
+- Bounded creation and revision of Markdown, text, JSON, and CSV task outputs in isolated generated directories.
+- Secret redaction, prompt-injection boundaries, bounded model context, and enforced memory/disk budgets.
+- Dashboard views for hearing, speech, beliefs, tool actions, confirmation waits, and resource use.
+- Persisted working, awaiting-confirmation, blocked, failed, verified, and cancelled task outcomes.
+- Validated-artifact context for grounded source Q&A before and after a narrated presentation.
+- A tested emergency stop that interrupts speech and halts capture, work, sharing, and meeting state.
+- Recovery that reopens a closed Meet target and resumes the bounded admission flow.
+- Durable second-participant rehearsal certification that combines explicit observed outcomes with
+  automated audio, grounding, sharing, narration, interaction, cleanup, fresh-start, and task-diversity checks.
+
+Not yet complete and therefore not grounds for calling the product finished:
+
+- Reliable named-speaker attribution when Meet caption metadata is unavailable.
+- Rich-format editing beyond generated text/JSON/CSV, reports, and presentations.
+- Model-directed native computer use beyond the controlled Chrome screen-share picker boundary.
+- Three consecutive fresh-start real Meet rehearsals meeting every completion criterion.
 
 ---
 
@@ -63,9 +99,9 @@ The MVP must demonstrate that Robin can:
 5. Recognize direct requests that mention “Robin.”
 6. Recognize unmistakable implied requests and confirm when intent is uncertain.
 7. Acknowledge accepted work aloud.
-8. Read approved local CSV, Excel, and PDF files.
-9. Generate accurate charts from structured data.
-10. Generate a short slide presentation from its analysis.
+8. Select and read approved local workspace files through bounded tools.
+9. Ground factual claims in sources Robin actually read.
+10. Generate a short cited presentation and report from its analysis.
 11. Continue listening while work is executing.
 12. Accept follow-up instructions that modify active work.
 13. Run a limited number of independent tasks concurrently.
@@ -358,6 +394,12 @@ Robin should sound:
 - Completed
 - Failed
 - Cancelled
+- Awaiting confirmation
+- Blocked
+- Verified
+
+Execution status and outcome state are persisted separately: for example, a task may remain ready
+to present while its live presentation outcome is blocked by admission or a native dialog.
 
 ### 10.6 Workspace and File Access
 
@@ -370,6 +412,8 @@ Robin should sound:
   - CSV
   - XLSX
   - PDF
+  - PPTX
+  - Markdown and plain text
 - Index available files before or during the meeting.
 - Search files using filenames, metadata, extracted text, and semantic relevance.
 - Record which files were used for each task.
@@ -462,6 +506,10 @@ The dashboard must display:
 - Generated artifacts
 - Error messages
 - Emergency stop
+- Incremental hearing/transcription activity
+- Robin's durable beliefs and their sources
+- Plans, tool actions, approval waits, verification, and recovery evidence
+- Peak memory and workspace disk use against configured budgets
 
 The dashboard must allow:
 
@@ -818,4 +866,10 @@ The presentation refreshes.
 
 ## 21. Product Definition of Done
 
-The hackathon MVP is complete when Robin can independently join a controlled Google Meet, receive and refine a request from any participant, analyze local business files, generate a chart and slide deck, present the result through its own shared screen, explain the output aloud, and remain available for additional meeting work without operator interaction after launch.
+Robin is complete only after all automated checks and three consecutive fresh-start real Google
+Meet rehearsals pass. The rehearsals must use different tasks and each must prove, from another
+participant's side, bidirectional audio, correct understanding, grounded and cited output, the
+correct shared surface, audible narration, live Q&A or revision, graceful leave, restored audio and
+browser state, and persisted audit evidence. Simulator state, a local success flag, a screenshot,
+or loopback audio by itself is insufficient. Until that evidence exists, the product remains an
+active implementation even when individual subsystems pass.

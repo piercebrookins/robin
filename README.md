@@ -6,8 +6,23 @@ This repository implements the hackathon MVP described in `Robin_PRD.md` and `Ro
 
 ## Quick Start
 
+After the one-time real-Meet setup, every rehearsal starts with one command:
+
 ```bash
-scripts/setup_partner.sh
+make robin
+```
+
+The command prepares a clean rehearsal, launches Robin's dedicated Chrome profile, starts the
+core and dashboard, opens the dashboard, and stays attached to the terminal until you press
+Control-C. Paste the Meet link into the dashboard and choose **Join & listen**. Use
+`scripts/run_robin.sh --keep-state` when you do not want to archive the previous rehearsal.
+The live activity feed reports each audio stage. Under **System details and manual controls**,
+use **Test Robin voice** and **Test hearing (4 sec)** before the first rehearsal.
+
+One-time setup:
+
+```bash
+scripts/setup_partner.sh --real-meet --no-start
 ```
 
 Open:
@@ -41,11 +56,14 @@ make dev
 make doctor
 make preflight
 make test
+make eval-operator
+make eval-operator-live
 make core
 make web
 make smoke
 make smoke-test
 make smoke-audio
+make smoke-audio-live
 make smoke-bridge
 make smoke-capture
 make smoke-listen
@@ -61,6 +79,9 @@ make smoke-validation
 make smoke-clarification
 make smoke-queue
 make smoke-dedup
+make smoke-agent
+make smoke-browser-operator
+make smoke-memory
 make demo-reset
 ROBIN_REAL_MEET_URL=https://meet.google.com/... make smoke-real-meet
 ```
@@ -71,17 +92,32 @@ ROBIN_REAL_MEET_URL=https://meet.google.com/... make smoke-real-meet
 uv run python scripts/smoke_capture.py --bundle-id com.apple.Safari
 ```
 
+`make smoke-audio-live` is the complete local audio proof. It generates real OpenAI speech,
+records and transcribes that speech directly from BlackHole 2ch, then plays the phrase from
+Robin's signed-in Chrome, captures Chrome with ScreenCaptureKit, and transcribes the result.
+The hearing check captures audio *coming out of
+Chrome*—in a real Meet, speak from another participant or device. Speaking into the same Mac's
+physical microphone is not Chrome output and is therefore not a valid hearing test.
+
 `make preflight` checks demo readiness: API keys, workspace data, database writes, free disk, internet access, dashboard reachability, presentation URL configuration, browser mode, audio bridge mode, and BlackHole requirements. Simulator mode reports real Google login, Chrome UI control, and macOS capture permissions as not required; switch `browser.automation_mode` and `audio.bridge_mode` in `config/robin.example.yaml` to exercise real-machine prerequisites.
 
 ## Current MVP Scope
 
 - Local FastAPI control plane with persisted runtime, meeting, transcript, task, artifact, and health state.
+- A bounded Responses API tool loop for real tasks: the model selects approved workspace files,
+  reads only those sources through workspace-scoped tools, and submits a cited presentation and
+  Markdown report. The runtime rejects unread or unapproved citations and validates the result
+  before it can be presented. Simulator-only runs retain the deterministic finance fixture worker.
+- A generated-file tool for creating and revising Markdown, text, JSON, and CSV outputs inside the
+  active task directory. It forbids path traversal, source edits, executable types, and oversized
+  content; audit records store filenames and byte counts rather than document contents.
 - Demo-readiness preflight covering workspace files, database writes, disk headroom, internet, dashboard, renderer, browser, audio, and simulator-vs-real prerequisites.
 - Supervisor command that starts core and web, waits for health checks, writes logs, and restarts crashed child processes.
 - Workspace boundary enforcement for CSV, XLSX, and PDF files.
 - Deterministic business-analysis worker that creates chart JSON/PNG, a browser-renderable deck JSON, and a downloadable PPTX export.
 - PDF context extraction for supporting narrative, citations, and validation source lineage while structured CSV/XLSX remains the numeric source of truth.
-- Persisted validation reports for finance analysis, with runtime gating before a deck can become ready to present.
+- Persisted validation reports for both general-agent and simulator finance outputs, with runtime
+  gating before a deck can become ready to present.
 - Revisioned chart, deck, and validation artifacts so spoken follow-ups preserve prior outputs while the presentation route serves the latest successful revision.
 - Dashboard with meeting controls, health, transcript, task queue, artifacts, and emergency stop.
 - Calendar discovery panel for configured local `.ics` or JSON events with Google Meet links.
@@ -108,10 +144,65 @@ uv run python scripts/smoke_capture.py --bundle-id com.apple.Safari
 - Basic speech floor manager that waits for a configurable silence window before Robin speaks, while ignoring Robin echo transcripts.
 - Swift macOS bridge JSON command contract with Python process client and simulator client.
 - Native bridge permission checks for Screen Recording, Accessibility, microphone, and BlackHole.
-- Native bridge WAV playback routed to a matching BlackHole audio device when available.
+- Native bridge WAV playback routed to the exact configured BlackHole audio device, with playback
+  failures, route, duration, and device reported truthfully.
 - Native bridge ScreenCaptureKit app listing and bounded Chrome audio sample capture command.
 - Bounded audio listening loop that captures, transcribes, deduplicates, and ingests meeting audio as transcript segments.
+- Realtime transcription sessions with server VAD and incremental transcript deltas, plus graceful
+  barge-in that stops Robin's native playback when another participant begins speaking.
+- Chunk-transfer OpenAI speech streamed as raw 24 kHz PCM into BlackHole, with sub-utterance
+  first-audio evidence, simultaneous WAV audit preservation, interruption, and output-route restore.
+- Best-effort named-speaker enrichment from visible Meet captions merged against realtime STT;
+  unmatched turns remain truthfully labeled `Meeting audio`.
+- Durable, sourced meeting memory for topics, references, decisions, objections, questions,
+  commitments, corrections, owners, deadlines, and resolution state. Memory survives restarts and
+  is bounded before it is sent back to a model.
+- Approval-gated model browser operator. GPT-5.6 inspects semantic Playwright snapshots and chooses
+  bounded click, fill, upload, and download actions. Uploads are restricted to approved workspace
+  source/generated files, downloads are isolated under `generated/browser-downloads`, and all file
+  transfers plus other consequential controls require an exact action-bound confirmation token.
+- Secret redaction at transcript, event, trace, browser-request, and workspace-context boundaries.
+- Enforced peak-memory and workspace-disk budgets, displayed live in the dashboard.
+- Persisted task outcome states for working, awaiting confirmation, blocked, failed, verified, and
+  cancelled work, with explanatory details visible in the dashboard.
+- Grounded post-task Q&A receives bounded validated slide, metric, outcome, and citation context;
+  spoken revisions preserve earlier artifacts and invalidate prior verification until rechecked.
+- Emergency stop interrupts playback, cancels and awaits task/speech/memory workers, stops capture
+  and sharing, deactivates presentation sessions, leaves Meet, and records cleanup errors.
+- Bounded admission waits, closed-target reopening, and one-shot CDP reconnection with cleanup,
+  screenshots, and recovery traces.
 - Meeting leave cleanup that stops the listening loop and presentation state before returning Robin to ready.
+
+## Operator Evidence and Limitations
+
+Robin distinguishes automated evidence from real-meeting proof:
+
+- `make test` runs unit, integration, recovery, adversarial, long-context, and safety checks.
+- `make eval-operator` runs the deterministic operator/build matrix and saves a timestamped JSON
+  evidence bundle under `RobinWorkspace/sessions/evidence/`; `make eval-operator-live` runs the
+  complementary live API model and realtime-audio checks without repeating the deterministic set.
+- `make smoke-agent`, `make smoke-browser-operator`, and `make smoke-memory` exercise live model
+  tool use, semantic browser inspection, and sourced memory correction.
+- `make smoke-conversation-revision` proves grounded source Q&A, spoken revision, preserved
+  revisions, latest-revision narration, and cleanup as one outcome-based flow.
+- `make smoke-resource-budgets` compares measured RSS and workspace size with configured limits.
+- `make smoke-audio-live` proves BlackHole output and Chrome capture/transcription locally.
+- `make smoke-real-meet` exercises the full Meet path, but a successful local process alone is not
+  proof that another participant heard narration or saw the shared surface.
+
+The product definition of done still requires three consecutive fresh-start rehearsals with
+different tasks. Each rehearsal must have participant-side confirmation of bidirectional audio,
+the correct shared surface, audible narration, grounded output, a live Q&A or revision, graceful
+leave, restored browser/audio state, and persisted audit evidence. Speaker names remain best-effort
+unless Meet caption metadata is available. Do not describe Robin as complete until those gates pass.
+
+After a rehearsal, leave the Meet normally. The dashboard then displays **Second-participant
+rehearsal proof** for the completed task. The participant who watched from the other device/account
+must enter their name and affirm every visible/audible outcome. Robin combines that confirmation
+with its own transcription, BlackHole route, validation, presentation/narration, interaction,
+leave, and restoration records. Evidence is retained across clean starts under
+`RobinWorkspace/rehearsals/`; repeated runtime instances or duplicate task requests cannot advance
+the consecutive-pass count.
 
 ## Native Bridge Mode
 
@@ -130,7 +221,17 @@ audio:
 
 Native ScreenCaptureKit audio routing and real Google Meet screen-share picker control are represented behind adapter interfaces so the app can run and test on a development machine before Mac provisioning is complete.
 
-The dashboard Audio Capture panel can capture a one-off sample or start/stop Robin's listening loop. In simulator mode, the loop uses the configured simulator transcript; in process bridge mode, it captures from the configured app bundle before transcription.
+The dashboard's audio checks verify Robin's voice output and Chrome capture/transcription separately.
+In simulator mode speech is an intentional short tone; real rehearsals must use `audio.mode: openai`
+and `audio.bridge_mode: process`. The live listener rejects silent captures locally before calling
+transcription and times out a stuck native bridge instead of wedging the meeting loop.
+
+Verify two real model-driven tasks through the bounded general-agent path in an isolated copy of
+the approved workspace:
+
+```bash
+make smoke-agent
+```
 
 For real Google Meet control, set `browser.automation_mode` to `playwright`, `browser.connection_mode` to `cdp`, and `browser.share_dialog_mode` to `cua_driver`. Point `browser.executable_path` at Google Chrome, then run `make launch-chrome` and sign in with Robin's pre-provisioned Google account in that dedicated profile. `cua-driver` must be on `PATH`, and CuaDriver.app needs Accessibility and Screen Recording permission. Computer Use is not used for ordinary Meet controls or credentials; it is bounded to Chrome-owned dialogs that Playwright cannot access.
 Then run `ROBIN_REAL_MEET_URL=... make smoke-real-meet` to join, generate a validated deck, present it, stop sharing, and leave.

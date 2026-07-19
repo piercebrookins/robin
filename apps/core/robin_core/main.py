@@ -8,11 +8,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from .runtime import RobinRuntime
+from .browser.operator_agent import BrowserOperatorResult
 from .preflight import run_preflight
 from .schemas import (
     AudioCaptureSampleRequest,
     AudioListenLoopRequest,
     AudioTranscribeRequest,
+    BrowserOperatorRequest,
     CalendarAutoJoinRequest,
     CalendarSnapshot,
     EventEnvelope,
@@ -20,6 +22,8 @@ from .schemas import (
     JoinMeetingRequest,
     PresentationGotoRequest,
     PresentationSession,
+    RehearsalConfirmationRequest,
+    RehearsalEvidence,
     RuntimeSnapshot,
     RuntimeMetrics,
     TaskCreateRequest,
@@ -55,13 +59,20 @@ async def shutdown() -> None:
 @app.get("/health")
 async def health() -> dict:
     runtime.refresh_health()
-    return {"ok": True, "state": runtime.runtime_state, "health": [item.model_dump(mode="json") for item in runtime.health]}
+    return {
+        "ok": True,
+        "state": runtime.runtime_state,
+        "health": [item.model_dump(mode="json") for item in runtime.health],
+    }
 
 
 @app.get("/api/preflight")
 async def preflight() -> dict:
     checks = run_preflight(runtime.settings)
-    return {"ok": all(item.ok for item in checks), "checks": [item.model_dump(mode="json") for item in checks]}
+    return {
+        "ok": all(item.ok for item in checks),
+        "checks": [item.model_dump(mode="json") for item in checks],
+    }
 
 
 @app.post("/api/audio/bridge/refresh", response_model=RuntimeSnapshot)
@@ -70,6 +81,26 @@ async def refresh_audio_bridge() -> RuntimeSnapshot:
         await runtime.refresh_bridge_health()
         return await runtime.publish()
     except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/audio/test/output", response_model=RuntimeSnapshot)
+async def test_audio_output() -> RuntimeSnapshot:
+    try:
+        return await runtime.test_audio_output()
+    except Exception as exc:
+        await runtime.emit_event("audio.output.test.failed", {"error": str(exc)}, component="audio")
+        await runtime.publish()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/audio/test/input")
+async def test_audio_input() -> dict:
+    try:
+        return await runtime.test_audio_input()
+    except Exception as exc:
+        await runtime.emit_event("audio.input.test.failed", {"error": str(exc)}, component="audio")
+        await runtime.publish()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -143,7 +174,10 @@ async def events_ws(websocket: WebSocket) -> None:
 @app.post("/api/meeting/join", response_model=RuntimeSnapshot)
 async def join_meeting(request: JoinMeetingRequest) -> RuntimeSnapshot:
     try:
-        return await runtime.join_meeting(request.meeting_url)
+        return await runtime.join_meeting(
+            request.meeting_url,
+            start_listening=request.start_listening,
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -217,6 +251,22 @@ async def start_audio_listen(request: AudioListenLoopRequest) -> RuntimeSnapshot
 @app.post("/api/audio/listen/stop", response_model=RuntimeSnapshot)
 async def stop_audio_listen() -> RuntimeSnapshot:
     return await runtime.stop_listening_loop()
+
+
+@app.post("/api/operator/browser", response_model=BrowserOperatorResult)
+async def run_browser_operator(request: BrowserOperatorRequest) -> BrowserOperatorResult:
+    try:
+        return await runtime.run_browser_operator(
+            request.request,
+            page_name=request.page_name,
+            approval_token=request.approval_token,
+        )
+    except Exception as exc:
+        await runtime.emit_event(
+            "browser.operator.failed", {"error": str(exc)}, component="browser_operator"
+        )
+        await runtime.publish()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/tasks", response_model=RuntimeSnapshot)
@@ -311,7 +361,9 @@ async def goto_presentation_slide_path(task_id: UUID, index: int) -> Presentatio
 
 
 @app.post("/api/presentations/{task_id}/goto", response_model=PresentationSession)
-async def goto_presentation_slide(task_id: UUID, request: PresentationGotoRequest) -> PresentationSession:
+async def goto_presentation_slide(
+    task_id: UUID, request: PresentationGotoRequest
+) -> PresentationSession:
     try:
         return await runtime.navigate_presentation(task_id, "goto", index=request.index)
     except Exception as exc:
@@ -321,6 +373,16 @@ async def goto_presentation_slide(task_id: UUID, request: PresentationGotoReques
 @app.post("/api/emergency-stop", response_model=RuntimeSnapshot)
 async def emergency_stop() -> RuntimeSnapshot:
     return await runtime.emergency_stop()
+
+
+@app.post("/api/rehearsals/confirm", response_model=RehearsalEvidence)
+async def confirm_rehearsal(
+    request: RehearsalConfirmationRequest,
+) -> RehearsalEvidence:
+    try:
+        return await runtime.record_rehearsal_confirmation(request)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/artifacts/{artifact_path:path}")

@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
+from playwright.async_api import async_playwright
 
 from robin_core.browser.controller import BrowserController
 from robin_core.browser.native_dialog import ShareDialogError, ShareDialogEvent
-from robin_core.browser.page_driver import SimulatedPageDriver
+from robin_core.browser.page_driver import CaptionTurn, PlaywrightPageDriver, SimulatedPageDriver
 from robin_core.config import BrowserConfig
 from robin_core.meeting.adapters.google_meet import GoogleMeetAdapter
-from robin_core.meeting.selectors import SelectorCandidate
+from robin_core.meeting.selectors import MEET_SELECTORS, SelectorCandidate
 from robin_core.schemas import MeetingState
 
 
@@ -29,6 +31,216 @@ async def test_google_meet_simulator_join_flow_clicks_prejoin_controls() -> None
     assert "join_button" in adapter.meet_page.clicked
     assert "prejoin_mute_button" in adapter.meet_page.clicked
     assert "prejoin_camera_button" in adapter.meet_page.clicked
+
+
+@pytest.mark.asyncio
+async def test_google_meet_microphone_actions_follow_visible_control_state() -> None:
+    config = BrowserConfig(automation_mode="simulator")
+    adapter = GoogleMeetAdapter(BrowserController(config), config)
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    await adapter.join()
+    page = adapter.meet_page
+    assert isinstance(page, SimulatedPageDriver)
+
+    await adapter.unmute()
+    clicks_after_unmute = page.clicked.count("unmute_button")
+    await adapter.unmute()
+    await adapter.mute()
+
+    assert clicks_after_unmute == 1
+    assert page.clicked.count("unmute_button") == 1
+    assert page.clicked.count("mute_button") == 1
+    assert adapter.muted is True
+
+
+@pytest.mark.asyncio
+async def test_google_meet_enables_captions_after_admission() -> None:
+    config = BrowserConfig(automation_mode="simulator", captions_enabled=True)
+    adapter = GoogleMeetAdapter(BrowserController(config), config)
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    page = adapter.meet_page
+    assert isinstance(page, SimulatedPageDriver)
+    page.visible_keys.add("enable_captions_button")
+
+    await adapter.join()
+
+    assert "enable_captions_button" in page.clicked
+
+
+@pytest.mark.asyncio
+async def test_playwright_driver_reads_visible_speaker_labeled_captions() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(
+            """
+            <div aria-live="polite" data-robin-caption>
+              <div data-speaker-name="Avery">Avery</div>
+              <div data-caption-text>Robin, summarize the launch risks.</div>
+            </div>
+            """
+        )
+
+        captions = await PlaywrightPageDriver(page).read_captions()
+
+        assert captions == [CaptionTurn("Avery", "Robin, summarize the launch risks.")]
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_google_meet_join_recovers_an_existing_joined_tab() -> None:
+    config = BrowserConfig(automation_mode="simulator")
+    adapter = GoogleMeetAdapter(BrowserController(config), config)
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    page = adapter.meet_page
+    assert isinstance(page, SimulatedPageDriver)
+    page.visible_keys.discard("join_button")
+    page.visible_keys.add("leave_button")
+    page.visible_keys.add("mute_button")
+    page.visible_keys.add("present_button")
+
+    await adapter.join()
+
+    assert adapter.state == MeetingState.LISTENING
+    assert "join_button" not in page.clicked
+    assert "mute_button" in page.clicked
+
+
+@pytest.mark.asyncio
+async def test_google_meet_waiting_room_leave_button_is_not_admission() -> None:
+    config = BrowserConfig(automation_mode="simulator", admission_timeout_ms=20)
+    adapter = GoogleMeetAdapter(BrowserController(config), config)
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    page = adapter.meet_page
+    assert isinstance(page, SimulatedPageDriver)
+    page.visible_keys.add("leave_button")
+
+    async def waiting_snapshot():
+        snapshot = await SimulatedPageDriver.inspect(page)
+        return type(snapshot)(
+            url=snapshot.url,
+            title=snapshot.title,
+            text="Please wait until a meeting host brings you into the call",
+            elements=snapshot.elements,
+        )
+
+    page.inspect = waiting_snapshot  # type: ignore[method-assign]
+
+    with pytest.raises(TimeoutError, match="not admitted"):
+        await adapter.join()
+
+    assert adapter.state != MeetingState.LISTENING
+
+
+@pytest.mark.asyncio
+async def test_google_meet_waiting_room_transient_blank_text_is_not_admission() -> None:
+    config = BrowserConfig(automation_mode="simulator")
+    adapter = GoogleMeetAdapter(BrowserController(config), config)
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    page = adapter.meet_page
+    assert isinstance(page, SimulatedPageDriver)
+    page.visible_keys.discard("join_button")
+    page.visible_keys.add("leave_button")
+    page.visible_keys.add("mute_button")
+
+    assert await adapter._is_admitted() is False
+
+
+@pytest.mark.asyncio
+async def test_google_meet_rejected_admission_fails_immediately() -> None:
+    config = BrowserConfig(automation_mode="simulator", admission_timeout_ms=1_000)
+    adapter = GoogleMeetAdapter(BrowserController(config), config)
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    page = adapter.meet_page
+    assert isinstance(page, SimulatedPageDriver)
+
+    async def rejected_snapshot():
+        snapshot = await SimulatedPageDriver.inspect(page)
+        return type(snapshot)(
+            url=snapshot.url,
+            title=snapshot.title,
+            text="You can't join this video call. No one can join a meeting unless invited or admitted by the host.",
+            elements=snapshot.elements,
+        )
+
+    page.inspect = rejected_snapshot  # type: ignore[method-assign]
+
+    with pytest.raises(PermissionError, match="rejected admission"):
+        await adapter.join()
+
+
+@pytest.mark.asyncio
+async def test_google_meet_leave_closes_the_controlled_meet_tab() -> None:
+    config = BrowserConfig(automation_mode="simulator")
+    browser = BrowserController(config)
+    adapter = GoogleMeetAdapter(browser, config)
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    await adapter.join()
+
+    await adapter.leave()
+
+    assert adapter.state == MeetingState.ENDED
+    assert adapter.meet_page is None
+    assert "meet" not in browser.pages
+
+
+def test_microphone_selectors_do_not_match_participant_mute_controls() -> None:
+    own_unmute = MEET_SELECTORS["unmute_button"][0].name_regex
+    own_mute = MEET_SELECTORS["mute_button"][0].name_regex
+
+    assert own_unmute is not None and own_mute is not None
+    assert re.search(own_unmute, "Turn on microphone (⌘ + d)", re.I)
+    assert re.search(own_mute, "Turn off microphone (⌘ + d)", re.I)
+    assert not re.search(own_unmute, "Mute Pierce Brookins for everyone", re.I)
+    assert not re.search(own_mute, "Mute Pierce Brookins for everyone", re.I)
+
+
+@pytest.mark.asyncio
+async def test_playwright_driver_clicks_visible_duplicate_selector_match() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(
+            """
+            <button aria-label="Stop presenting" style="display:none">Hidden</button>
+            <button aria-label="Stop presenting" onclick="this.dataset.clicked='yes'">Visible</button>
+            """
+        )
+        driver = PlaywrightPageDriver(page)
+
+        await driver.click_first(MEET_SELECTORS["stop_presenting_button"], 1_000)
+
+        assert await page.locator("button:visible").get_attribute("data-clicked") == "yes"
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_browser_controller_closes_stale_duplicate_presentation_tabs() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        context = await browser.new_context()
+        await context.route("http://example.test/**", lambda route: route.fulfill(body="ok"))
+        dashboard = await context.new_page()
+        await dashboard.goto("http://example.test/")
+        old_deck = await context.new_page()
+        await old_deck.goto("http://example.test/present/old?revision=1")
+        current_deck = await context.new_page()
+        await current_deck.goto("http://example.test/present/current?revision=1")
+        duplicate_current = await context.new_page()
+        await duplicate_current.goto("http://example.test/present/current?revision=1")
+        controller = BrowserController(BrowserConfig(automation_mode="playwright"))
+        controller._context = context
+
+        await controller._close_stale_presentation_pages(
+            "http://example.test/present/current?revision=1"
+        )
+
+        remaining = [page.url for page in context.pages]
+        assert remaining == [
+            "http://example.test/",
+            "http://example.test/present/current?revision=1",
+        ]
+        await browser.close()
 
 
 @pytest.mark.asyncio
@@ -194,6 +406,89 @@ async def test_playwright_browser_uses_persistent_profile(tmp_path: Path) -> Non
     assert page.url == "about:blank"
     assert config.profile_dir.exists()
     await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_browser_reuses_named_page_instead_of_opening_duplicate_tabs() -> None:
+    config = BrowserConfig(automation_mode="simulator")
+    browser = BrowserController(config)
+
+    first = await browser.open_page("meet", "https://meet.google.com/abc-defg-hij")
+    second = await browser.open_page("meet", "https://meet.google.com/abc-defg-hij")
+
+    assert second is first
+    assert list(browser.pages) == ["meet"]
+
+
+@pytest.mark.asyncio
+async def test_browser_reconnects_once_after_lost_cdp_connection() -> None:
+    class RecoveringController(BrowserController):
+        attempts = 0
+
+        async def _open_playwright_page_once(self, name: str, url: str):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ConnectionError("CDP transport closed")
+            page = SimulatedPageDriver()
+            await page.goto(url, self.config.navigation_timeout_ms)
+            return page
+
+    config = BrowserConfig(
+        automation_mode="playwright",
+        connection_mode="cdp",
+    )
+    browser = RecoveringController(config)
+
+    page = await browser.open_page("meet", "https://meet.google.com/abc-defg-hij")
+
+    assert page.url == "https://meet.google.com/abc-defg-hij"
+    assert browser.attempts == 2
+    assert browser.recovery_count == 1
+    assert "CDP transport closed" in (browser.last_recovery_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_google_meet_reopens_closed_target_while_waiting_for_admission() -> None:
+    class ClosingAfterJoinPage(SimulatedPageDriver):
+        failed = False
+
+        async def inspect(self):
+            if "join_button" in self.clicked and not self.failed:
+                self.failed = True
+                raise RuntimeError("Target page, context or browser has been closed")
+            return await super().inspect()
+
+        def is_closed(self) -> bool:
+            return self.failed
+
+    class ReopeningBrowser(BrowserController):
+        open_count = 0
+
+        async def open_page(self, name: str, url: str):
+            self.open_count += 1
+            page = ClosingAfterJoinPage() if self.open_count == 1 else SimulatedPageDriver()
+            await page.goto(url, self.config.navigation_timeout_ms)
+            self.pages[name] = page
+            return page
+
+    config = BrowserConfig(
+        automation_mode="simulator",
+        admission_timeout_ms=1_000,
+        ui_action_retries=1,
+        ui_recovery_pause_ms=0,
+    )
+    browser = ReopeningBrowser(config)
+    adapter = GoogleMeetAdapter(browser, config)
+
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    await adapter.join()
+
+    assert adapter.state == MeetingState.LISTENING
+    assert browser.open_count == 2
+    assert any(
+        event.action == "admission_target" and event.recovered
+        for event in adapter.recovery_events or []
+    )
 
 
 class FaultySimulatedPageDriver(SimulatedPageDriver):

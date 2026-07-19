@@ -30,6 +30,13 @@ async def test_simulator_bridge_client_tracks_capture_and_playback(tmp_path: Pat
     sample = await client.capture_audio_sample("com.google.Chrome", tmp_path / "capture.wav")
     stop = await client.stop_capture()
 
+    async def pcm_chunks():
+        yield b"\x01\x00" * 120
+
+    streamed = await client.play_pcm_stream(
+        pcm_chunks(), tmp_path / "speech.pcm", 24_000
+    )
+
     assert permissions.audio_device_available is True
     assert start.result["capturing"] is True
     assert play.result["played"] is True
@@ -37,6 +44,8 @@ async def test_simulator_bridge_client_tracks_capture_and_playback(tmp_path: Pat
     assert sample.ok is True
     assert Path(sample.result["path"]).exists()
     assert stop.result["capturing"] is False
+    assert streamed.ok is True
+    assert streamed.result["route"] == "pcm_stream"
 
 
 @pytest.mark.asyncio
@@ -59,4 +68,70 @@ async def test_process_bridge_client_health_after_swift_build(tmp_path: Path) ->
     assert response.result["played"] == "true"
     if permissions.audio_device_available:
         assert "BlackHole" in response.result["output_device"]
-        assert response.result["route"] == "engine"
+        assert response.result["route"] == "default_device_swap"
+        after_playback = await client.permissions_status()
+        assert after_playback.default_output_device == permissions.default_output_device
+
+
+@pytest.mark.asyncio
+async def test_process_bridge_passes_configured_output_device(tmp_path: Path) -> None:
+    client = ProcessBridgeClient(tmp_path / "bridge", "Exact Virtual Device")
+    sent: dict[str, object] = {}
+
+    async def fake_send(
+        method: str,
+        params: dict[str, object],
+        timeout_seconds: float = 15,
+        track_playback: bool = False,
+    ):
+        sent.update(
+            {
+                "method": method,
+                "params": params,
+                "timeout": timeout_seconds,
+                "track_playback": track_playback,
+            }
+        )
+        from robin_core.audio.bridge_client import BridgeResponse
+
+        return BridgeResponse(id="test", ok=True, result={"played": "true"})
+
+    client._send = fake_send  # type: ignore[method-assign]
+    await client.play_audio(tmp_path / "voice.wav")
+
+    assert sent["method"] == "audio.output.play"
+    assert sent["params"] == {
+        "path": str(tmp_path / "voice.wav"),
+        "output_device": "Exact Virtual Device",
+    }
+    assert sent["timeout"] == 60
+    assert sent["track_playback"] is True
+
+
+@pytest.mark.asyncio
+async def test_process_bridge_playback_timeout_includes_wav_duration(tmp_path: Path) -> None:
+    client = ProcessBridgeClient(tmp_path / "bridge")
+    audio = tmp_path / "long.wav"
+    with wave.open(str(audio), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(24_000)
+        wav.writeframes(b"\x00\x00" * 24_000 * 20)
+    sent: dict[str, float] = {}
+
+    async def fake_send(
+        _method: str,
+        _params: dict[str, object],
+        timeout_seconds: float = 15,
+        track_playback: bool = False,
+    ):
+        sent["timeout"] = timeout_seconds
+        assert track_playback is True
+        from robin_core.audio.bridge_client import BridgeResponse
+
+        return BridgeResponse(id="test", ok=True, result={"played": "true"})
+
+    client._send = fake_send  # type: ignore[method-assign]
+    await client.play_audio(audio)
+
+    assert sent["timeout"] == pytest.approx(28)

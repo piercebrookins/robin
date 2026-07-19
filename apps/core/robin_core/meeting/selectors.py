@@ -28,13 +28,15 @@ MEET_SELECTORS: dict[str, list[SelectorCandidate]] = {
     ],
     "mute_button": [
         SelectorCandidate(
-            role="button", name_regex=r"Turn off microphone|Mute microphone|Microphone"
+            role="button",
+            name_regex=r"^(?:Turn off microphone|Mute microphone)(?:\b.*)?$",
         ),
         SelectorCandidate(test_id="mute-button"),
     ],
     "unmute_button": [
         SelectorCandidate(
-            role="button", name_regex=r"Turn on microphone|Unmute microphone|Microphone"
+            role="button",
+            name_regex=r"^(?:Turn on microphone|Unmute microphone)(?:\b.*)?$",
         ),
         SelectorCandidate(test_id="unmute-button"),
     ],
@@ -52,16 +54,36 @@ MEET_SELECTORS: dict[str, list[SelectorCandidate]] = {
         SelectorCandidate(test_id="share-tab-option"),
     ],
     "stop_presenting_button": [
-        SelectorCandidate(role="button", name_regex=r"Stop presenting|Stop sharing"),
+        SelectorCandidate(role="button", name_regex=r"^(?:Stop presenting|Stop sharing)$"),
         SelectorCandidate(test_id="stop-presenting-button"),
     ],
     "presenting_signal": [
         SelectorCandidate(text_regex=r"You are presenting"),
-        SelectorCandidate(role="button", name_regex=r"Stop presenting|Stop sharing"),
+        SelectorCandidate(role="button", name_regex=r"^(?:Stop presenting|Stop sharing)$"),
         SelectorCandidate(test_id="presenting-signal"),
     ],
     "joined_signal": [
         SelectorCandidate(role="button", name_regex=r"Leave call|Leave meeting"),
         SelectorCandidate(test_id="joined-signal"),
+    ],
+    "in_call_signal": [
+        SelectorCandidate(role="button", name_regex=r"Present now|Share screen|Present"),
+        SelectorCandidate(
+            role="button",
+            name_regex=r"Turn on captions|Show captions|Enable captions|Turn off captions|Hide captions|Disable captions",
+        ),
+        SelectorCandidate(test_id="in-call-signal"),
+    ],
+    "enable_captions_button": [
+        SelectorCandidate(
+            role="button", name_regex=r"Turn on captions|Show captions|Enable captions"
+        ),
+        SelectorCandidate(test_id="enable-captions-button"),
+    ],
+    "disable_captions_button": [
+        SelectorCandidate(
+            role="button", name_regex=r"Turn off captions|Hide captions|Disable captions"
+        ),
+        SelectorCandidate(test_id="disable-captions-button"),
     ],
 }

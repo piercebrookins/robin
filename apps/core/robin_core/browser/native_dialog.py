@@ -74,6 +74,8 @@ class CuaDriverShareDialogController:
         attempts = max(self.config.share_dialog_retries, 0) + 1
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
+            pid: int | None = None
+            window_id: int | None = None
             try:
                 await self._ensure_daemon(attempt)
                 await self._ensure_permissions(attempt)
@@ -124,6 +126,8 @@ class CuaDriverShareDialogController:
                 self._record("attempt_failed", attempt, False, str(exc))
                 if attempt < attempts:
                     await asyncio.sleep(max(self.config.ui_recovery_pause_ms, 0) / 1000)
+                elif pid is not None and window_id is not None:
+                    await self._cancel_picker(pid, window_id, attempt)
         raise ShareDialogError(
             f"Chrome share picker automation failed: {last_error}", list(self.events)
         )
@@ -267,6 +271,24 @@ class CuaDriverShareDialogController:
             {"pid": pid, "window_id": window_id, "element_index": element_index},
         )
 
+    async def _cancel_picker(self, pid: int, window_id: int, attempt: int) -> None:
+        try:
+            tree = await self._ax_tree(pid, window_id)
+            cancel_index = self._find_cancel_button(tree)
+            if cancel_index is None:
+                self._record("cancel_picker", attempt, False, "enabled Cancel button not found")
+                return
+            await self._click(pid, window_id, cancel_index)
+            closed = await self._verify_picker_closed(pid, window_id)
+            self._record(
+                "cancel_picker",
+                attempt,
+                closed,
+                "picker cancelled" if closed else "Cancel clicked but picker remained visible",
+            )
+        except Exception as exc:
+            self._record("cancel_picker", attempt, False, f"cleanup failed: {exc}")
+
     async def _cua(self, tool: str, arguments: dict[str, object]) -> str:
         return await self.runner([self.config.computer_use_command, tool, json.dumps(arguments)])
 
@@ -315,6 +337,17 @@ class CuaDriverShareDialogController:
             if "AXButton" not in line or "DISABLED" in line:
                 continue
             if re.search(r'["=(]\s*Share(?:["\s)]|$)', line, re.IGNORECASE):
+                match = re.search(r"\[(\d+)\]", line)
+                if match:
+                    return int(match.group(1))
+        return None
+
+    @staticmethod
+    def _find_cancel_button(tree: str) -> int | None:
+        for line in tree.splitlines():
+            if "AXButton" not in line or "DISABLED" in line:
+                continue
+            if re.search(r'["=(]\s*Cancel(?:["\s)]|$)', line, re.IGNORECASE):
                 match = re.search(r"\[(\d+)\]", line)
                 if match:
                     return int(match.group(1))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -37,7 +38,9 @@ async def test_runtime_event_stream_receives_structured_envelopes(tmp_path: Path
     stream = runtime.subscribe_events()
 
     await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
-    events = [await anext(stream), await anext(stream)]
+    events = []
+    while not events or events[-1].type != "meeting.joined":
+        events.append(await asyncio.wait_for(anext(stream), timeout=1))
 
     assert events[-1].type == "meeting.joined"
     assert events[-1].meeting_id == runtime.meeting_id

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
@@ -53,7 +54,16 @@ class GoogleMeetAdapter:
         if parsed.hostname not in set(self.config.allowed_meet_hosts):
             raise ValueError("Only Google Meet URLs are supported.")
         self.current_url = meeting_url
+        recovery_count = self.browser.recovery_count
         self.meet_page = await self.browser.open_page("meet", meeting_url)
+        if self.browser.recovery_count > recovery_count:
+            self._record_recovery(
+                "cdp_reconnect",
+                self.browser.recovery_count,
+                recovered=True,
+                error=self.browser.last_recovery_reason or "Reconnected to Robin Chrome.",
+                page=self.meet_page,
+            )
         self.state = MeetingState.PREJOIN
 
     async def enter_prejoin(self) -> None:
@@ -75,26 +85,185 @@ class GoogleMeetAdapter:
     async def _turn_off_prejoin_media(self) -> None:
         page = self._page()
         if await page.is_visible(MEET_SELECTORS["prejoin_mute_button"], 1_000):
-            await self._click_with_recovery("prejoin_mute_button", MEET_SELECTORS["prejoin_mute_button"], 3_000)
+            await self._click_with_recovery(
+                "prejoin_mute_button", MEET_SELECTORS["prejoin_mute_button"], 3_000
+            )
         if await page.is_visible(MEET_SELECTORS["prejoin_camera_button"], 1_000):
-            await self._click_with_recovery("prejoin_camera_button", MEET_SELECTORS["prejoin_camera_button"], 3_000)
+            await self._click_with_recovery(
+                "prejoin_camera_button", MEET_SELECTORS["prejoin_camera_button"], 3_000
+            )
         self.muted = True
         self.camera_enabled = False
 
     async def join(self) -> None:
         if not self.current_url:
             raise ValueError("No meeting URL has been supplied.")
+        if await self._is_admitted():
+            await self.camera_off()
+            await self.mute()
+            await self.enable_captions()
+            self.state = MeetingState.LISTENING
+            return
         await self.enter_prejoin()
         await self.camera_off()
         await self.mute()
         await self._click_with_recovery(
             "join_button", MEET_SELECTORS["join_button"], self.config.prejoin_timeout_ms
         )
-        if not await self._page().is_visible(
-            MEET_SELECTORS["joined_signal"], self.config.admission_timeout_ms
-        ):
-            raise TimeoutError("Robin was not admitted to the meeting before the timeout.")
+        self.state = MeetingState.REQUESTING_ADMISSION
+        await self._wait_for_admission()
+        await self.enable_captions()
         self.state = MeetingState.LISTENING
+
+    async def enable_captions(self) -> None:
+        if not self.config.captions_enabled or not self.meet_page:
+            return
+        if await self.meet_page.is_visible(MEET_SELECTORS["disable_captions_button"], 500):
+            return
+        if await self.meet_page.is_visible(MEET_SELECTORS["enable_captions_button"], 500):
+            await self._click_with_recovery(
+                "enable_captions_button",
+                MEET_SELECTORS["enable_captions_button"],
+                2_000,
+            )
+
+    async def recent_captions(self):
+        return await self._page().read_captions()
+
+    async def _wait_for_admission(self) -> None:
+        deadline = time.monotonic() + self.config.admission_timeout_ms / 1000
+        last_text = ""
+        pending_seen = False
+        recovery_attempts = 0
+        while time.monotonic() < deadline:
+            try:
+                snapshot = await asyncio.wait_for(self._page().inspect(), timeout=2.0)
+            except TimeoutError:
+                last_text = "Meet page inspection timed out while waiting for admission."
+                await asyncio.sleep(0.1)
+                continue
+            except Exception as exc:
+                last_text = f"Meet page inspection failed while waiting for admission: {exc}"
+                if recovery_attempts >= max(self.config.ui_action_retries, 0):
+                    raise RuntimeError(last_text) from exc
+                recovery_attempts += 1
+                admitted = await self._recover_admission_target(recovery_attempts, exc)
+                if admitted:
+                    return
+                continue
+            last_text = " ".join(snapshot.text.casefold().split())
+            if self._admission_rejected(last_text):
+                raise PermissionError("Google Meet rejected admission: " + snapshot.text[:300])
+            if self._admission_pending(last_text):
+                pending_seen = True
+            elif await self._is_admitted():
+                if pending_seen:
+                    self._record_recovery(
+                        "admission_wait",
+                        1,
+                        recovered=True,
+                        error="Robin was admitted after waiting for the host.",
+                        page=self._page(),
+                    )
+                return
+            await asyncio.sleep(min(self.config.ui_recovery_pause_ms / 1000, 0.5) or 0.1)
+        screenshot_path = await self._capture_recovery_screenshot(
+            "admission_timeout", 1, self._page()
+        )
+        detail = f" Last page text: {last_text[:240]}" if last_text else ""
+        self._record_recovery(
+            "admission_wait",
+            1,
+            recovered=False,
+            error="Robin was not admitted before the configured deadline." + detail,
+            page=self._page(),
+            screenshot_path=screenshot_path,
+        )
+        raise TimeoutError("Robin was not admitted to the meeting before the timeout." + detail)
+
+    async def _recover_admission_target(self, attempt: int, error: Exception) -> bool:
+        stale_page = self._page()
+        screenshot_path = await self._capture_recovery_screenshot(
+            "admission_target", attempt, stale_page
+        )
+        self._record_recovery(
+            "admission_target",
+            attempt,
+            recovered=False,
+            error=str(error),
+            page=stale_page,
+            screenshot_path=screenshot_path,
+        )
+        if not self.current_url:
+            raise RuntimeError("Cannot recover admission without a meeting URL")
+        self.meet_page = await self.browser.open_page("meet", self.current_url)
+        if await self._is_admitted():
+            self._record_recovery(
+                "admission_target",
+                attempt,
+                recovered=True,
+                error=str(error),
+                page=self.meet_page,
+            )
+            return True
+        snapshot = await self.meet_page.inspect()
+        text = " ".join(snapshot.text.casefold().split())
+        if not self._admission_pending(text):
+            await self.enter_prejoin()
+            await self.camera_off()
+            await self.mute()
+            await self._click_with_recovery(
+                "join_button",
+                MEET_SELECTORS["join_button"],
+                self.config.prejoin_timeout_ms,
+            )
+            self.state = MeetingState.REQUESTING_ADMISSION
+        self._record_recovery(
+            "admission_target",
+            attempt,
+            recovered=True,
+            error=str(error),
+            page=self.meet_page,
+        )
+        return False
+
+    async def _is_admitted(self) -> bool:
+        page = self._page()
+        snapshot = await page.inspect()
+        text = " ".join(snapshot.text.casefold().split())
+        if self._admission_pending(text) or self._admission_rejected(text):
+            return False
+        joined = await page.is_visible(MEET_SELECTORS["joined_signal"], 500)
+        own_microphone = await page.is_visible(
+            MEET_SELECTORS["mute_button"], 250
+        ) or await page.is_visible(MEET_SELECTORS["unmute_button"], 250)
+        in_call_control = await page.is_visible(MEET_SELECTORS["in_call_signal"], 500)
+        return joined and own_microphone and in_call_control
+
+    @staticmethod
+    def _admission_pending(text: str) -> bool:
+        return any(
+            marker in text
+            for marker in (
+                "please wait until a meeting host brings you into the call",
+                "asking to join",
+                "waiting for the host",
+                "someone in the meeting should let you in soon",
+            )
+        )
+
+    @staticmethod
+    def _admission_rejected(text: str) -> bool:
+        return any(
+            marker in text
+            for marker in (
+                "you can't join this video call",
+                "you cannot join this video call",
+                "your request to join was denied",
+                "no one can join a meeting unless invited or admitted",
+                "meeting code has expired",
+            )
+        )
 
     async def leave(self) -> None:
         if self.meet_page and self.state not in {MeetingState.IDLE, MeetingState.ENDED}:
@@ -104,17 +273,29 @@ class GoogleMeetAdapter:
                 )
             except Exception:
                 pass
+        await self.browser.close_page("meet")
+        self.meet_page = None
         self.state = MeetingState.ENDED
         self.presenting = False
 
     async def mute(self) -> None:
-        if self.meet_page and not self.muted:
-            await self._click_with_recovery("mute_button", MEET_SELECTORS["mute_button"], 3_000)
+        if self.meet_page:
+            if await self.meet_page.is_visible(MEET_SELECTORS["mute_button"], 750):
+                await self._click_with_recovery("mute_button", MEET_SELECTORS["mute_button"], 3_000)
+            elif not await self.meet_page.is_visible(MEET_SELECTORS["unmute_button"], 750):
+                raise RuntimeError("Meet microphone control is unavailable; could not mute Robin.")
         self.muted = True
 
     async def unmute(self) -> None:
-        if self.meet_page and self.muted:
-            await self._click_with_recovery("unmute_button", MEET_SELECTORS["unmute_button"], 3_000)
+        if self.meet_page:
+            if await self.meet_page.is_visible(MEET_SELECTORS["unmute_button"], 750):
+                await self._click_with_recovery(
+                    "unmute_button", MEET_SELECTORS["unmute_button"], 3_000
+                )
+            elif not await self.meet_page.is_visible(MEET_SELECTORS["mute_button"], 750):
+                raise RuntimeError(
+                    "Meet microphone control is unavailable; could not unmute Robin."
+                )
         self.muted = False
 
     async def camera_off(self) -> None:

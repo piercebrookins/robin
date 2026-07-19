@@ -1,4 +1,7 @@
-.PHONY: setup launch-chrome seed seed-demo dev doctor preflight core web test smoke smoke-test smoke-audio smoke-bridge smoke-capture smoke-listen smoke-leave-cleanup smoke-meet-fixture smoke-meet-recovery smoke-share-dialog-fixture smoke-calendar smoke-observability smoke-workspace smoke-retry-present smoke-validation smoke-clarification smoke-queue smoke-dedup smoke-real-meet demo-reset typecheck
+.PHONY: robin setup launch-chrome seed seed-demo dev doctor preflight core web test eval-operator eval-operator-live smoke smoke-test smoke-audio smoke-audio-live smoke-audio-realtime smoke-browser-operator smoke-memory smoke-agent smoke-bridge smoke-capture smoke-listen smoke-leave-cleanup smoke-meet-fixture smoke-meet-recovery smoke-share-dialog-fixture smoke-calendar smoke-observability smoke-workspace smoke-retry-present smoke-conversation-revision smoke-resource-budgets smoke-validation smoke-clarification smoke-queue smoke-dedup smoke-real-meet demo-reset typecheck
+
+robin:
+	scripts/run_robin.sh
 
 setup:
 	scripts/setup_partner.sh
@@ -29,6 +32,12 @@ test:
 	uv run pytest
 	pnpm --dir apps/web test
 
+eval-operator:
+	uv run python scripts/run_operator_evals.py
+
+eval-operator-live:
+	uv run python scripts/run_operator_evals.py --live-only
+
 smoke:
 	uv run python scripts/smoke_demo.py
 
@@ -37,6 +46,21 @@ smoke-test: smoke
 smoke-audio:
 	uv run python scripts/smoke_tts.py
 	uv run python scripts/smoke_transcription.py
+
+smoke-audio-live:
+	uv run python scripts/smoke_audio_workflow.py
+
+smoke-audio-realtime:
+	uv run python scripts/smoke_realtime_audio.py
+
+smoke-browser-operator:
+	uv run python scripts/smoke_browser_operator.py
+
+smoke-memory:
+	uv run python scripts/smoke_meeting_memory.py
+
+smoke-agent:
+	PYTHONPATH=apps/core uv run python scripts/smoke_general_agent.py
 
 smoke-bridge:
 	uv run python scripts/smoke_bridge.py
@@ -70,6 +94,12 @@ smoke-workspace:
 
 smoke-retry-present:
 	uv run python scripts/smoke_retry_present.py
+
+smoke-conversation-revision:
+	uv run python scripts/smoke_conversation_revision.py
+
+smoke-resource-budgets:
+	uv run python scripts/smoke_resource_budgets.py
 
 smoke-validation:
 	uv run python scripts/smoke_validation.py

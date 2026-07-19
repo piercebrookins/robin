@@ -123,6 +123,18 @@ ensure_node_and_pnpm() {
   has_cmd pnpm || fail "pnpm is still unavailable. Install pnpm and rerun this script."
 }
 
+ensure_ffmpeg() {
+  if has_cmd ffmpeg; then
+    return
+  fi
+  log "Installing ffmpeg for real audio loopback validation"
+  if has_cmd brew; then
+    brew install ffmpeg
+  else
+    fail "ffmpeg is required for real audio validation. Install ffmpeg, then rerun this script."
+  fi
+}
+
 write_env() {
   if [[ ! -f .env ]]; then
     cp .env.example .env
@@ -226,6 +238,7 @@ log "Creating .env"
 write_env
 
 if [[ "$REAL_MEET" -eq 1 ]]; then
+  ensure_ffmpeg
   log "Switching config to real Meet mode"
   set_real_meet_config
 fi

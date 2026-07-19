@@ -1,19 +1,28 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import resource
+import subprocess
+import sys
 import time
+from difflib import SequenceMatcher
 from pathlib import Path
 from contextlib import suppress
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from .artifacts import ArtifactWorker
+from .agent import GeneralTaskAgent
 from .audio.bridge import AudioBridge
+from .audio.realtime import RealtimeTranscriber
 from .calendar import calendar_snapshot
 from .config import Settings, load_settings
 from .intent import IntentClassifier
 from .browser.controller import BrowserController
+from .browser.operator_agent import BrowserOperatorResult, ControlledBrowserAgent
 from .meeting.adapters.google_meet import GoogleMeetAdapter
+from .memory import MeetingMemoryManager
 from .persistence import Store
 from .schemas import (
     Artifact,
@@ -22,6 +31,7 @@ from .schemas import (
     FileIndexRecord,
     HealthItem,
     MeetingIntent,
+    MeetingMemoryItem,
     MeetingState,
     CalendarSnapshot,
     RobinTask,
@@ -29,23 +39,33 @@ from .schemas import (
     RuntimeMetrics,
     RuntimeState,
     PresentationSession,
+    RehearsalConfirmationRequest,
+    RehearsalEvidence,
     SpeechRecord,
     TaskStatus,
+    TaskOutcomeState,
     TranscriptSegment,
+    ValidationReport,
     WorkspaceSnapshot,
     now_utc,
 )
+from .security import redact_text, redact_value
 from .workspace import Workspace
 
 
 class RobinRuntime:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or load_settings()
+        self._started_monotonic = time.monotonic()
+        self._runtime_instance_id = uuid4()
         self.workspace = Workspace(self.settings.workspace)
         self.store = Store(self.settings.database.path)
         self.intent = IntentClassifier(self.settings)
+        self.memory_manager = MeetingMemoryManager(self.settings)
         self.artifacts_worker = ArtifactWorker(self.workspace, self.settings.presentation.base_url)
         self.browser = BrowserController(self.settings.browser)
+        self.task_agent = GeneralTaskAgent(self.settings, self.workspace)
+        self.browser_operator = ControlledBrowserAgent(self.settings, self.browser)
         self.meet = GoogleMeetAdapter(self.browser, self.settings.browser)
         self.audio = AudioBridge(
             self.settings.audio,
@@ -57,6 +77,9 @@ class RobinRuntime:
         self.meeting_url: str | None = None
         self.meeting_id = uuid4()
         self.transcript: list[TranscriptSegment] = self.store.list("transcript", TranscriptSegment)
+        self.meeting_memory: list[MeetingMemoryItem] = self.store.list(
+            "meeting_memory", MeetingMemoryItem
+        )
         self.tasks: list[RobinTask] = self.store.list("task", RobinTask)
         self.artifacts: list[Artifact] = self.store.list("artifact", Artifact)
         self.files: list[FileIndexRecord] = self.store.list("file", FileIndexRecord)
@@ -68,6 +91,12 @@ class RobinRuntime:
         self._subscribers: set[asyncio.Queue[RuntimeSnapshot]] = set()
         self._event_subscribers: set[asyncio.Queue[EventEnvelope]] = set()
         self._listen_handle: asyncio.Task | None = None
+        self._join_lock = asyncio.Lock()
+        self._speech_lock = asyncio.Lock()
+        self._capture_lock = asyncio.Lock()
+        self._speech_handles: set[asyncio.Task] = set()
+        self._memory_handles: set[asyncio.Task] = set()
+        self._last_spoken_at_ms = 0
         self._calendar_handle: asyncio.Task | None = None
         self._calendar_joined_event_ids: set[str] = set()
         self._calendar_active_event_id: str | None = None
@@ -75,6 +104,8 @@ class RobinRuntime:
         self._pending_confirmation: tuple[MeetingIntent, TranscriptSegment, UUID] | None = None
         self._last_audio_text: str | None = None
         self._last_audio_text_at_ms: int = 0
+        self._last_silence_event_at_ms: int = 0
+        self._realtime_partials: dict[str, str] = {}
         self._meet_recovery_event_count = 0
         self.refresh_health()
 
@@ -84,12 +115,17 @@ class RobinRuntime:
             meeting_state=self.meeting_state,
             meeting_url=self.meeting_url,
             meeting_id=self.meeting_id,
-            listening=self.meeting_state in {MeetingState.LISTENING, MeetingState.SPEAKING, MeetingState.PRESENTING},
+            listening=self.meeting_state
+            in {MeetingState.LISTENING, MeetingState.SPEAKING, MeetingState.PRESENTING},
             presenting=self.meet.presenting,
             capture_loop_running=self._listen_handle is not None and not self._listen_handle.done(),
-            calendar_auto_join_running=self._calendar_handle is not None and not self._calendar_handle.done(),
+            calendar_auto_join_running=self._calendar_handle is not None
+            and not self._calendar_handle.done(),
             health=self.health,
             transcript=self.transcript[-100:],
+            meeting_memory=[
+                item for item in self.meeting_memory if item.meeting_id == self.meeting_id
+            ][-100:],
             tasks=sorted(self.tasks, key=lambda task: task.created_at),
             artifacts=sorted(self.artifacts, key=lambda artifact: artifact.created_at),
             speech=sorted(self.speech, key=lambda item: item.started_at)[-25:],
@@ -99,11 +135,29 @@ class RobinRuntime:
     def refresh_health(self) -> None:
         bridge_mode = self.settings.audio.bridge_mode
         self.health = [
-            HealthItem(name="workspace", ok=self.workspace.root.exists(), detail=str(self.workspace.root)),
-            HealthItem(name="audio_capture", ok=self.audio.capture_healthy, detail=f"{self.settings.audio.mode}/{bridge_mode} bridge healthy"),
-            HealthItem(name="virtual_microphone", ok=self.audio.virtual_mic_healthy, detail=self.settings.audio.output_device_name),
-            HealthItem(name="browser_automation", ok=True, detail=f"{self.settings.browser.automation_mode} adapter ready"),
-            HealthItem(name="openai", ok=bool(self.settings.openai_api_key), detail="configured" if self.settings.openai_api_key else "local fallback"),
+            HealthItem(
+                name="workspace", ok=self.workspace.root.exists(), detail=str(self.workspace.root)
+            ),
+            HealthItem(
+                name="audio_capture",
+                ok=self.audio.capture_healthy,
+                detail=f"{self.settings.audio.mode}/{bridge_mode} bridge healthy",
+            ),
+            HealthItem(
+                name="virtual_microphone",
+                ok=self.audio.virtual_mic_healthy,
+                detail=self.settings.audio.output_device_name,
+            ),
+            HealthItem(
+                name="browser_automation",
+                ok=True,
+                detail=f"{self.settings.browser.automation_mode} adapter ready",
+            ),
+            HealthItem(
+                name="openai",
+                ok=bool(self.settings.openai_api_key),
+                detail="configured" if self.settings.openai_api_key else "local fallback",
+            ),
         ]
 
     async def refresh_bridge_health(self) -> None:
@@ -112,28 +166,125 @@ class RobinRuntime:
         self.audio.virtual_mic_healthy = permissions.audio_device_available
         self.refresh_health()
 
-    async def join_meeting(self, meeting_url: str) -> RuntimeSnapshot:
-        started = time.perf_counter()
-        self.runtime_state = RuntimeState.JOINING_MEETING
-        self.meeting_state = MeetingState.NAVIGATING
-        self.meeting_url = meeting_url
-        await self.emit_event("meeting.join.started", {"meeting_url": meeting_url}, component="meeting")
-        await self.meet.navigate(meeting_url)
-        self.meeting_state = self.meet.state
-        await self.meet.join()
-        self.meeting_state = self.meet.state
-        await self._emit_meet_recovery_events()
-        self.runtime_state = RuntimeState.IN_MEETING
-        await self.emit_event(
-            "meeting.joined",
-            {"meeting_url": meeting_url, "latency_ms": int((time.perf_counter() - started) * 1000)},
-            component="meeting",
-        )
-        return await self.publish()
+    async def join_meeting(
+        self,
+        meeting_url: str,
+        start_listening: bool = False,
+    ) -> RuntimeSnapshot:
+        async with self._join_lock:
+            admitted_states = {
+                MeetingState.JOINED,
+                MeetingState.LISTENING,
+                MeetingState.SPEAKING,
+                MeetingState.PRESENTING,
+            }
+            joining_states = {
+                MeetingState.NAVIGATING,
+                MeetingState.PREJOIN,
+                MeetingState.REQUESTING_ADMISSION,
+            }
+            if self.meeting_url == meeting_url and self.meeting_state in admitted_states:
+                await self.emit_event(
+                    "meeting.join.duplicate_suppressed",
+                    {"meeting_url": meeting_url},
+                    component="meeting",
+                )
+                if start_listening:
+                    await self.start_listening_loop()
+                return await self.publish()
+            if self.meeting_url == meeting_url and self.meeting_state in joining_states:
+                raise RuntimeError("Robin is still waiting for admission to this meeting.")
+            if self.meeting_url and self.meeting_state in admitted_states | joining_states:
+                raise ValueError(
+                    "Robin is already in a meeting. Leave it before joining another link."
+                )
+
+            started = time.perf_counter()
+            self.meeting_id = uuid4()
+            self.runtime_state = RuntimeState.JOINING_MEETING
+            self.meeting_state = MeetingState.NAVIGATING
+            self.meeting_url = meeting_url
+            await self.emit_event(
+                "meeting.join.started", {"meeting_url": meeting_url}, component="meeting"
+            )
+            await self.publish()
+            try:
+                await self.meet.navigate(meeting_url)
+                self.meeting_state = self.meet.state
+                await self.publish()
+                await self._join_meet_with_progress()
+                self.meeting_state = self.meet.state
+                await self._emit_meet_recovery_events()
+                self.runtime_state = RuntimeState.IN_MEETING
+                await self.emit_event(
+                    "meeting.joined",
+                    {
+                        "meeting_url": meeting_url,
+                        "latency_ms": int((time.perf_counter() - started) * 1000),
+                    },
+                    component="meeting",
+                )
+                await self.publish()
+                if start_listening:
+                    return await self.start_listening_loop()
+                return self.snapshot()
+            except Exception as exc:
+                with suppress(Exception):
+                    await self.meet.leave()
+                await self._emit_meet_recovery_events()
+                self.runtime_state = RuntimeState.READY
+                self.meeting_state = MeetingState.IDLE
+                self.meeting_url = None
+                await self.emit_event(
+                    "meeting.join.failed",
+                    {"meeting_url": meeting_url, "error": str(exc)},
+                    component="meeting",
+                )
+                await self.publish()
+                raise
+
+    async def _join_meet_with_progress(self) -> None:
+        handle = asyncio.create_task(self.meet.join())
+        total_timeout = (
+            self.settings.browser.prejoin_timeout_ms
+            + self.settings.browser.admission_timeout_ms
+            + 10_000
+        ) / 1000
+        deadline = time.monotonic() + total_timeout
+        last_state = self.meeting_state
+        try:
+            while True:
+                done, _pending = await asyncio.wait({handle}, timeout=0.2)
+                if self.meet.state != last_state:
+                    last_state = self.meet.state
+                    self.meeting_state = last_state
+                    await self.emit_event(
+                        "meeting.state.changed",
+                        {"state": last_state.value},
+                        component="meeting",
+                    )
+                    await self.publish()
+                if done:
+                    await handle
+                    return
+                if time.monotonic() >= deadline:
+                    handle.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await handle
+                    raise TimeoutError(
+                        f"Meet join exceeded the bounded {total_timeout:.1f}s deadline."
+                    )
+        except asyncio.CancelledError:
+            handle.cancel()
+            with suppress(asyncio.CancelledError):
+                await handle
+            raise
 
     def calendar_snapshot(self) -> CalendarSnapshot:
         snapshot = calendar_snapshot(self.settings.calendar)
-        snapshot.auto_join_running = self._calendar_handle is not None and not self._calendar_handle.done()
+        snapshot.auto_join_running = (
+            self._calendar_handle is not None and not self._calendar_handle.done()
+        )
         return snapshot
 
     async def reindex_workspace(self) -> WorkspaceSnapshot:
@@ -175,21 +326,31 @@ class RobinRuntime:
         return await self._join_calendar_event(event)
 
     async def _join_calendar_event(self, event) -> RuntimeSnapshot:
-        await self.emit_event("calendar.event.selected", event.model_dump(mode="json"), component="calendar")
+        await self.emit_event(
+            "calendar.event.selected", event.model_dump(mode="json"), component="calendar"
+        )
         self._calendar_joined_event_ids.add(event.id)
         self._calendar_active_event_id = event.id
         self._calendar_active_event_end = event.end
         return await self.join_meeting(event.meeting_url)
 
-    async def set_calendar_auto_join(self, enabled: bool, interval_seconds: float = 15.0) -> RuntimeSnapshot:
+    async def set_calendar_auto_join(
+        self, enabled: bool, interval_seconds: float = 15.0
+    ) -> RuntimeSnapshot:
         self.settings.calendar.auto_join = enabled
         if enabled:
             if not self.settings.calendar.enabled:
                 raise ValueError("Calendar discovery is disabled.")
             if self._calendar_handle and not self._calendar_handle.done():
                 return await self.publish()
-            self._calendar_handle = asyncio.create_task(self._calendar_loop(max(interval_seconds, 1.0)))
-            await self.emit_event("calendar.auto_join.enabled", {"interval_seconds": max(interval_seconds, 1.0)}, component="calendar")
+            self._calendar_handle = asyncio.create_task(
+                self._calendar_loop(max(interval_seconds, 1.0))
+            )
+            await self.emit_event(
+                "calendar.auto_join.enabled",
+                {"interval_seconds": max(interval_seconds, 1.0)},
+                component="calendar",
+            )
         else:
             if self._calendar_handle and not self._calendar_handle.done():
                 self._calendar_handle.cancel()
@@ -201,13 +362,25 @@ class RobinRuntime:
 
     async def poll_calendar_once(self, now: datetime | None = None) -> RuntimeSnapshot:
         snapshot = calendar_snapshot(self.settings.calendar, now=now)
-        snapshot.auto_join_running = self._calendar_handle is not None and not self._calendar_handle.done()
+        snapshot.auto_join_running = (
+            self._calendar_handle is not None and not self._calendar_handle.done()
+        )
         if snapshot.error:
-            await self.emit_event("calendar.poll.failed", {"error": snapshot.error}, component="calendar")
+            await self.emit_event(
+                "calendar.poll.failed", {"error": snapshot.error}, component="calendar"
+            )
             return await self.publish()
         current = now or datetime.now(timezone.utc)
-        if self._calendar_active_event_id and self._calendar_active_event_end and self._calendar_active_event_end <= current:
-            await self.emit_event("calendar.event.ended", {"event_id": self._calendar_active_event_id}, component="calendar")
+        if (
+            self._calendar_active_event_id
+            and self._calendar_active_event_end
+            and self._calendar_active_event_end <= current
+        ):
+            await self.emit_event(
+                "calendar.event.ended",
+                {"event_id": self._calendar_active_event_id},
+                component="calendar",
+            )
             self._calendar_active_event_id = None
             self._calendar_active_event_end = None
             if self.meeting_url:
@@ -215,10 +388,18 @@ class RobinRuntime:
         if not self.settings.calendar.auto_join:
             return await self.publish()
         if snapshot.conflicts:
-            await self.emit_event("calendar.auto_join.skipped", {"reason": "conflict", "conflicts": snapshot.conflicts}, component="calendar")
+            await self.emit_event(
+                "calendar.auto_join.skipped",
+                {"reason": "conflict", "conflicts": snapshot.conflicts},
+                component="calendar",
+            )
             return await self.publish()
         if self.meeting_state not in {MeetingState.IDLE, MeetingState.ENDED} and self.meeting_url:
-            await self.emit_event("calendar.auto_join.skipped", {"reason": "already_in_meeting", "meeting_url": self.meeting_url}, component="calendar")
+            await self.emit_event(
+                "calendar.auto_join.skipped",
+                {"reason": "already_in_meeting", "meeting_url": self.meeting_url},
+                component="calendar",
+            )
             return await self.publish()
         join_before = current.timestamp() + self.settings.calendar.join_early_seconds
         candidates = [
@@ -232,7 +413,9 @@ class RobinRuntime:
         if not candidates:
             return await self.publish()
         event = candidates[0]
-        await self.emit_event("calendar.auto_join.started", event.model_dump(mode="json"), component="calendar")
+        await self.emit_event(
+            "calendar.auto_join.started", event.model_dump(mode="json"), component="calendar"
+        )
         return await self._join_calendar_event(event)
 
     async def _calendar_loop(self, interval_seconds: float) -> None:
@@ -243,7 +426,9 @@ class RobinRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await self.emit_event("calendar.auto_join.failed", {"error": str(exc)}, component="calendar")
+            await self.emit_event(
+                "calendar.auto_join.failed", {"error": str(exc)}, component="calendar"
+            )
             await self.publish()
 
     async def leave_meeting(self) -> RuntimeSnapshot:
@@ -266,27 +451,212 @@ class RobinRuntime:
 
     async def emergency_stop(self) -> RuntimeSnapshot:
         self.runtime_state = RuntimeState.STOPPING
-        for handle in self._task_handles.values():
+        cleanup_errors: list[str] = []
+        try:
+            await self.audio.interrupt_speech()
+        except Exception as exc:
+            cleanup_errors.append(f"interrupt_speech: {exc}")
+        await self.stop_listening_loop()
+        task_handles = list(self._task_handles.values())
+        speech_handles = list(self._speech_handles)
+        for handle in [*task_handles, *speech_handles]:
             handle.cancel()
+        if task_handles or speech_handles:
+            await asyncio.gather(*task_handles, *speech_handles, return_exceptions=True)
+        self._task_handles.clear()
+        self._speech_handles.clear()
+        for handle in list(self._memory_handles):
+            handle.cancel()
+        if self._memory_handles:
+            await asyncio.gather(*self._memory_handles, return_exceptions=True)
+            self._memory_handles.clear()
         if self._calendar_handle and not self._calendar_handle.done():
             self._calendar_handle.cancel()
             with suppress(asyncio.CancelledError):
                 await self._calendar_handle
             self._calendar_handle = None
             self.settings.calendar.auto_join = False
-        await self.stop_listening_loop()
+        if self.meet.presenting or any(state.active for state in self.presentations.values()):
+            try:
+                await self.meet.stop_presenting()
+            except Exception as exc:
+                cleanup_errors.append(f"stop_presenting: {exc}")
+        for state in self.presentations.values():
+            state.active = False
+            state.updated_at = now_utc()
         for task in self.tasks:
             if task.status not in {TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED}:
                 task.status = TaskStatus.CANCELLED
+                task.outcome_state = TaskOutcomeState.CANCELLED
+                task.outcome_detail = "Cancelled by emergency stop."
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
-        await self.audio.stop()
-        await self.meet.leave()
+        try:
+            await self.audio.stop()
+        except Exception as exc:
+            cleanup_errors.append(f"audio_stop: {exc}")
+        try:
+            await self.meet.leave()
+        except Exception as exc:
+            cleanup_errors.append(f"meeting_leave: {exc}")
+        self.meet.presenting = False
+        self.meet.muted = True
         self.meeting_state = MeetingState.ENDED
         self.runtime_state = RuntimeState.READY
         self.refresh_health()
-        await self.emit_event("runtime.emergency_stop", {}, component="runtime")
+        await self.emit_event(
+            "runtime.emergency_stop",
+            {"cleanup_errors": cleanup_errors},
+            component="runtime",
+        )
         return await self.publish()
+
+    async def record_rehearsal_confirmation(
+        self, request: RehearsalConfirmationRequest
+    ) -> RehearsalEvidence:
+        task = self._find_task(request.task_id)
+        if task.meeting_id != self.meeting_id:
+            raise ValueError("The task does not belong to the current meeting")
+        evidence_dir = self.settings.workspace.root / "rehearsals"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        previous = self._rehearsal_evidence(evidence_dir)
+        previous_passed = [item for item in previous if item.passed]
+        last_passed = previous_passed[-1] if previous_passed else None
+        events = [event for event in self.recent_events(500) if event.meeting_id == self.meeting_id]
+        task_events = [event for event in events if event.task_id == task.id]
+        transcript = [
+            segment for segment in self.transcript if segment.meeting_id == self.meeting_id
+        ]
+        validation = self._latest_artifact(task.id, "validation_json")
+        validation_ok = False
+        if validation is not None:
+            try:
+                validation_ok = ValidationReport.model_validate_json(
+                    self.workspace.resolve(validation.path).read_text(encoding="utf-8")
+                ).ok
+            except Exception:
+                validation_ok = False
+        narration_count = sum(event.type == "presentation.narration" for event in task_events)
+        try:
+            slide_count = self._deck_slide_count(task.id)
+        except Exception:
+            slide_count = 0
+        outbound_audio = any(
+            speech.error is None
+            and speech.completed_at is not None
+            and "blackhole" in (speech.playback_device or "").casefold()
+            for speech in self.speech
+        )
+        inbound_audio = any(segment.source in {"audio_stt", "merged"} for segment in transcript)
+        live_interaction = task.revision > 1 or any(
+            event.type == "conversation.addressed" for event in events
+        )
+        normalized_task = " ".join(task.requested_outcome.casefold().split())
+        prior_task = None
+        if last_passed:
+            try:
+                prior_task = str(
+                    json.loads(
+                        (self.settings.workspace.root / last_passed.evidence_path).read_text(
+                            encoding="utf-8"
+                        )
+                    ).get("task_fingerprint", "")
+                )
+            except Exception:
+                prior_task = None
+        automated_checks = {
+            "fresh_runtime": last_passed is None
+            or last_passed.runtime_instance_id != self._runtime_instance_id,
+            "different_task": not prior_task or prior_task != normalized_task,
+            "inbound_audio_transcribed": inbound_audio,
+            "outbound_audio_routed_to_blackhole": outbound_audio,
+            "task_verified": task.outcome_state == TaskOutcomeState.VERIFIED,
+            "grounding_validation_passed": validation_ok,
+            "presentation_started": any(
+                event.type == "presentation.started" for event in task_events
+            ),
+            "presentation_completed": any(
+                event.type == "presentation.completed" for event in task_events
+            ),
+            "every_slide_narrated": slide_count > 0 and narration_count >= slide_count,
+            "live_interaction_observed": live_interaction,
+            "meeting_left": any(event.type == "meeting.left" for event in events),
+            "state_restored": self.runtime_state == RuntimeState.READY
+            and self.meeting_state in {MeetingState.ENDED, MeetingState.IDLE}
+            and not self.snapshot().capture_loop_running
+            and not self.snapshot().presenting,
+        }
+        confirmations = {
+            "robin_heard_participant": request.robin_heard_participant,
+            "correct_understanding": request.correct_understanding,
+            "grounded_output": request.grounded_output,
+            "correct_shared_surface": request.correct_shared_surface,
+            "audible_narration": request.audible_narration,
+            "live_qa_or_revision": request.live_qa_or_revision,
+            "graceful_leave": request.graceful_leave,
+        }
+        passed = all(automated_checks.values()) and all(confirmations.values())
+        prior_streak = previous[-1].consecutive_passes if previous and previous[-1].passed else 0
+        evidence = RehearsalEvidence(
+            runtime_instance_id=self._runtime_instance_id,
+            meeting_id=self.meeting_id,
+            task_id=task.id,
+            run_number=len(previous) + 1,
+            consecutive_passes=prior_streak + 1 if passed else 0,
+            participant_name=redact_text(request.participant_name.strip()),
+            notes=redact_text(request.notes.strip()),
+            confirmations=confirmations,
+            automated_checks=automated_checks,
+            passed=passed,
+            commit=self._git_commit(),
+        )
+        filename = (
+            f"rehearsal-{evidence.created_at.strftime('%Y%m%dT%H%M%SZ')}-"
+            f"{str(evidence.id)[:8]}.json"
+        )
+        relative_path = (Path("rehearsals") / filename).as_posix()
+        evidence.evidence_path = relative_path
+        body = evidence.model_dump(mode="json")
+        body["task_fingerprint"] = normalized_task
+        (self.settings.workspace.root / relative_path).write_text(
+            json.dumps(body, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        await self.emit_event(
+            "rehearsal.confirmed",
+            {
+                "evidence_path": relative_path,
+                "passed": passed,
+                "consecutive_passes": evidence.consecutive_passes,
+                "failed_checks": [
+                    name for name, ok in {**automated_checks, **confirmations}.items() if not ok
+                ],
+            },
+            task_id=task.id,
+            component="rehearsal",
+        )
+        return evidence
+
+    @staticmethod
+    def _git_commit() -> str | None:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        value = result.stdout.strip()
+        return value or None
+
+    @staticmethod
+    def _rehearsal_evidence(evidence_dir: Path) -> list[RehearsalEvidence]:
+        evidence: list[RehearsalEvidence] = []
+        for path in sorted(evidence_dir.glob("rehearsal-*.json")):
+            try:
+                evidence.append(RehearsalEvidence.model_validate_json(path.read_text()))
+            except Exception:
+                continue
+        return sorted(evidence, key=lambda item: item.created_at)
 
     async def ingest_transcript(
         self,
@@ -297,6 +667,7 @@ class RobinRuntime:
         source: str = "simulator",
     ) -> RuntimeSnapshot:
         now_ms = int(time.time() * 1000)
+        text = redact_text(text)
         segment = TranscriptSegment(
             meeting_id=self.meeting_id,
             speaker_name=speaker_name,
@@ -307,6 +678,7 @@ class RobinRuntime:
         )
         self.transcript.append(segment)
         self.store.upsert("transcript", segment)
+        self._schedule_memory_update(segment)
         await self.emit_event(
             "transcript.final",
             {"text": segment.text, "speaker_name": segment.speaker_name, "source": segment.source},
@@ -315,33 +687,81 @@ class RobinRuntime:
         await self._handle_intent(segment)
         return await self.publish()
 
-    async def transcribe_audio_file(self, relative_path: str, speaker_name: str | None = None) -> RuntimeSnapshot:
+    def _schedule_memory_update(self, segment: TranscriptSegment) -> None:
+        handle = asyncio.create_task(self._update_meeting_memory(segment))
+        self._memory_handles.add(handle)
+        handle.add_done_callback(self._memory_handles.discard)
+
+    async def _update_meeting_memory(self, segment: TranscriptSegment) -> None:
+        try:
+            current = [
+                item for item in self.meeting_memory if item.meeting_id == segment.meeting_id
+            ]
+            additions, resolve_ids = await self.memory_manager.extract(segment, current)
+            before = {item.id: item.status for item in self.meeting_memory}
+            MeetingMemoryManager.merge(self.meeting_memory, additions, resolve_ids)
+            for item in self.meeting_memory:
+                if item.id not in before or before[item.id] != item.status:
+                    self.store.upsert("meeting_memory", item)
+            if additions or resolve_ids:
+                await self.emit_event(
+                    "memory.updated",
+                    {
+                        "added": [item.model_dump(mode="json") for item in additions],
+                        "resolved_ids": resolve_ids,
+                    },
+                    component="meeting_memory",
+                )
+                await self.publish()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self.emit_event(
+                "memory.update.failed", {"error": str(exc)}, component="meeting_memory"
+            )
+            await self.publish()
+
+    async def transcribe_audio_file(
+        self, relative_path: str, speaker_name: str | None = None
+    ) -> RuntimeSnapshot:
         path = self.workspace.resolve(relative_path)
         if not path.is_file():
             raise FileNotFoundError(f"Audio file not found: {relative_path}")
         text = await self.audio.transcribe_file(path)
         return await self.ingest_transcript(text, speaker_name=speaker_name, source="audio_stt")
 
-    async def capture_audio_sample(self, bundle_id: str = "com.google.Chrome", duration_ms: int = 1500, output_name: str | None = None) -> dict:
+    async def capture_audio_sample(
+        self,
+        bundle_id: str = "com.google.Chrome",
+        duration_ms: int = 1500,
+        output_name: str | None = None,
+        emit_capture_event: bool = True,
+    ) -> dict:
         capture_dir = self.workspace.sessions / "captures"
         capture_dir.mkdir(parents=True, exist_ok=True)
         safe_name = output_name or f"capture_{int(time.time() * 1000)}.wav"
         if "/" in safe_name or ".." in safe_name:
             raise ValueError("output_name must be a simple filename")
         output_path = capture_dir / safe_name
-        response = await self.audio.bridge_client.capture_audio_sample(bundle_id, output_path, duration_ms=duration_ms)
-        await self.emit_event(
-            "audio.capture.sample",
-            {
-                "bundle_id": bundle_id,
-                "duration_ms": duration_ms,
-                "path": str(output_path.relative_to(self.workspace.root)),
-                "ok": response.ok,
-                "result": response.result,
-                "error": response.error,
-            },
-            component="audio",
-        )
+        async with self._capture_lock:
+            response = await self.audio.bridge_client.capture_audio_sample(
+                bundle_id,
+                output_path,
+                duration_ms=duration_ms,
+            )
+        if emit_capture_event:
+            await self.emit_event(
+                "audio.capture.sample",
+                {
+                    "bundle_id": bundle_id,
+                    "duration_ms": duration_ms,
+                    "path": str(output_path.relative_to(self.workspace.root)),
+                    "ok": response.ok,
+                    "result": response.result,
+                    "error": response.error,
+                },
+                component="audio",
+            )
         return {
             "ok": response.ok,
             "path": output_path.relative_to(self.workspace.root).as_posix(),
@@ -349,28 +769,130 @@ class RobinRuntime:
             "error": response.error,
         }
 
+    async def test_audio_output(self) -> RuntimeSnapshot:
+        text = "Robin voice check. If you can hear this, my meeting audio is working."
+        await self.emit_event(
+            "audio.output.test.started",
+            {"device": self.settings.audio.output_device_name},
+            component="audio",
+        )
+        active_meeting = self.meeting_url is not None and self.meeting_state not in {
+            MeetingState.IDLE,
+            MeetingState.ENDED,
+        }
+        if active_meeting:
+            await self._acknowledge(text)
+        else:
+            await self._speak_and_record(text)
+            await self.publish()
+        speech = self.speech[-1]
+        await self.emit_event(
+            "audio.output.test.passed",
+            {
+                "device": speech.playback_device or self.settings.audio.output_device_name,
+                "duration_seconds": speech.duration_seconds,
+                "mode": speech.mode,
+            },
+            component="audio",
+        )
+        return await self.publish()
+
+    async def test_audio_input(self, duration_ms: int | None = None) -> dict:
+        sample_ms = duration_ms or self.settings.audio.capture_sample_duration_ms
+        await self.emit_event(
+            "audio.input.test.started",
+            {
+                "bundle_id": self.settings.audio.capture_bundle_id,
+                "duration_ms": sample_ms,
+            },
+            component="audio",
+        )
+        result = await self.capture_audio_sample(
+            bundle_id=self.settings.audio.capture_bundle_id,
+            duration_ms=sample_ms,
+            output_name="audio_input_test.wav",
+            emit_capture_event=False,
+        )
+        if not result["ok"]:
+            payload = {
+                **result,
+                "rms": 0.0,
+                "peak": 0.0,
+                "threshold": self.settings.audio.silence_rms_threshold,
+                "transcript": "",
+            }
+            await self.emit_event("audio.input.test.failed", payload, component="audio")
+            await self.publish()
+            return payload
+        metrics = result.get("result", {})
+        rms = float(metrics.get("rms", 0.0))
+        peak = float(metrics.get("peak", 0.0))
+        signal = rms >= self.settings.audio.silence_rms_threshold
+        transcript = ""
+        if signal:
+            transcript = (
+                await self.audio.transcribe_file(self.workspace.resolve(result["path"]))
+            ).strip()
+        event_type = (
+            "audio.input.test.passed" if signal and transcript else "audio.input.test.quiet"
+        )
+        payload = {
+            "rms": rms,
+            "peak": peak,
+            "threshold": self.settings.audio.silence_rms_threshold,
+            "transcript": transcript,
+            "path": result["path"],
+        }
+        await self.emit_event(event_type, payload, component="audio")
+        await self.publish()
+        return {"ok": event_type.endswith("passed"), **payload}
+
     async def capture_and_transcribe_once(
         self,
         bundle_id: str | None = None,
         duration_ms: int | None = None,
         speaker_name: str = "Meeting audio",
+        retain_capture: bool = True,
     ) -> RuntimeSnapshot:
         started_ms = int(time.time() * 1000)
         result = await self.capture_audio_sample(
             bundle_id=bundle_id or self.settings.audio.capture_bundle_id,
             duration_ms=duration_ms or self.settings.audio.capture_sample_duration_ms,
+            emit_capture_event=retain_capture,
         )
         if not result["ok"]:
             await self.emit_event("audio.capture.skipped", result, component="audio")
             return await self.publish()
-        text = await self.audio.transcribe_file(self.workspace.resolve(result["path"]))
+        capture_path = self.workspace.resolve(result["path"])
+        rms = float(result.get("result", {}).get("rms", 1.0))
+        if rms < self.settings.audio.silence_rms_threshold:
+            now_ms = int(time.time() * 1000)
+            if now_ms - self._last_silence_event_at_ms >= 30_000:
+                await self.emit_event(
+                    "audio.silence.skipped",
+                    {"rms": rms},
+                    component="audio",
+                )
+                self._last_silence_event_at_ms = now_ms
+            if not retain_capture:
+                capture_path.unlink(missing_ok=True)
+            return await self.publish()
+        try:
+            text = await self.audio.transcribe_file(capture_path)
+        finally:
+            if not retain_capture:
+                capture_path.unlink(missing_ok=True)
         normalized = " ".join(text.lower().split())
         now_ms = int(time.time() * 1000)
         if not normalized:
-            await self.emit_event("audio.transcript.empty", {"path": result["path"]}, component="audio")
+            await self.emit_event(
+                "audio.transcript.empty", {"path": result["path"]}, component="audio"
+            )
             return await self.publish()
         if normalized == self._last_audio_text and now_ms - self._last_audio_text_at_ms < 10_000:
-            await self.emit_event("audio.transcript.duplicate_suppressed", {"text": text}, component="audio")
+            await self.emit_event(
+                "audio.transcript.duplicate_suppressed", {"text": text}, component="audio"
+            )
             return await self.publish()
         self._last_audio_text = normalized
         self._last_audio_text_at_ms = now_ms
@@ -392,16 +914,35 @@ class RobinRuntime:
         if self._listen_handle and not self._listen_handle.done():
             return self.snapshot()
         self._listen_handle = asyncio.create_task(
-            self._listening_loop(
+            self._realtime_listening_loop(
                 bundle_id=bundle_id or self.settings.audio.capture_bundle_id,
-                duration_ms=duration_ms if duration_ms is not None else self.settings.audio.capture_sample_duration_ms,
-                interval_ms=interval_ms if interval_ms is not None else self.settings.audio.capture_loop_interval_ms,
+                max_iterations=max_iterations,
+            )
+            if self.settings.audio.realtime_transcription_enabled and self.settings.openai_api_key
+            else self._listening_loop(
+                bundle_id=bundle_id or self.settings.audio.capture_bundle_id,
+                duration_ms=duration_ms
+                if duration_ms is not None
+                else self.settings.audio.capture_sample_duration_ms,
+                interval_ms=interval_ms
+                if interval_ms is not None
+                else self.settings.audio.capture_loop_interval_ms,
                 max_iterations=max_iterations,
             )
         )
         if self.meeting_state == MeetingState.IDLE:
             self.meeting_state = MeetingState.LISTENING
-        await self.emit_event("audio.listen.started", {"bundle_id": bundle_id or self.settings.audio.capture_bundle_id}, component="audio")
+        await self.emit_event(
+            "audio.listen.started",
+            {
+                "bundle_id": bundle_id or self.settings.audio.capture_bundle_id,
+                "mode": "realtime"
+                if self.settings.audio.realtime_transcription_enabled
+                and self.settings.openai_api_key
+                else "bounded",
+            },
+            component="audio",
+        )
         return await self.publish()
 
     async def stop_listening_loop(self) -> RuntimeSnapshot:
@@ -413,11 +954,68 @@ class RobinRuntime:
         await self.emit_event("audio.listen.stopped", {}, component="audio")
         return await self.publish()
 
-    async def _listening_loop(self, bundle_id: str, duration_ms: int, interval_ms: int, max_iterations: int | None) -> None:
+    async def run_browser_operator(
+        self,
+        request: str,
+        page_name: str = "meet",
+        approval_token: str | None = None,
+    ) -> BrowserOperatorResult:
+        request = redact_text(request)
+        await self.emit_event(
+            "browser.operator.started",
+            {"request": request[:500], "page": page_name},
+            component="browser_operator",
+        )
+        result = await self.browser_operator.execute(
+            request, page_name, approval_token=approval_token
+        )
+        for call in result.tool_calls:
+            await self.emit_event(
+                "browser.operator.tool",
+                call,
+                component="browser_operator",
+            )
+        await self.emit_event(
+            "browser.operator.awaiting_confirmation"
+            if result.status == "awaiting_confirmation"
+            else "browser.operator.completed",
+            result.model_dump(mode="json"),
+            component="browser_operator",
+        )
+        await self.publish()
+        return result
+
+    async def _listening_loop(
+        self, bundle_id: str, duration_ms: int, interval_ms: int, max_iterations: int | None
+    ) -> None:
         iterations = 0
+        consecutive_failures = 0
         try:
             while max_iterations is None or iterations < max_iterations:
-                await self.capture_and_transcribe_once(bundle_id=bundle_id, duration_ms=duration_ms)
+                now_ms = int(time.time() * 1000)
+                speech_cooldown = max(self.settings.audio.post_speech_cooldown_ms, 0)
+                if (
+                    self.meeting_state == MeetingState.SPEAKING
+                    or now_ms - self._last_spoken_at_ms < speech_cooldown
+                ):
+                    await asyncio.sleep(0.1)
+                    continue
+                try:
+                    await self.capture_and_transcribe_once(
+                        bundle_id=bundle_id,
+                        duration_ms=duration_ms,
+                        retain_capture=False,
+                    )
+                    consecutive_failures = 0
+                except Exception as exc:
+                    consecutive_failures += 1
+                    await self.emit_event(
+                        "audio.listen.iteration_failed",
+                        {"error": str(exc), "consecutive_failures": consecutive_failures},
+                        component="audio",
+                    )
+                    await self.publish()
+                    await asyncio.sleep(min(2**consecutive_failures, 10))
                 iterations += 1
                 await asyncio.sleep(max(interval_ms, 0) / 1000)
         except asyncio.CancelledError:
@@ -427,6 +1025,170 @@ class RobinRuntime:
             self.audio.capture_healthy = False
             self.refresh_health()
             await self.publish()
+
+    async def _realtime_listening_loop(
+        self, bundle_id: str, max_iterations: int | None = None
+    ) -> None:
+        failures = 0
+        completed_turns = 0
+
+        async def on_partial(item_id: str, delta: str) -> None:
+            if not delta:
+                return
+            text = self._realtime_partials.get(item_id, "") + delta
+            self._realtime_partials[item_id] = text
+            await self.emit_event(
+                "audio.transcript.partial",
+                {"item_id": item_id, "text": text},
+                component="audio",
+            )
+            await self.publish()
+
+        async def on_final(item_id: str, transcript: str) -> None:
+            nonlocal completed_turns
+            self._realtime_partials.pop(item_id, None)
+            text = transcript.strip()
+            if not text:
+                return
+            if self._is_recent_robin_echo(text):
+                await self.emit_event(
+                    "audio.transcript.echo_suppressed",
+                    {"item_id": item_id, "text": text},
+                    component="audio",
+                )
+                return
+            normalized = " ".join(text.casefold().split())
+            now_ms = int(time.time() * 1000)
+            if (
+                normalized == self._last_audio_text
+                and now_ms - self._last_audio_text_at_ms < 10_000
+            ):
+                await self.emit_event(
+                    "audio.transcript.duplicate_suppressed",
+                    {"item_id": item_id, "text": text},
+                    component="audio",
+                )
+                return
+            self._last_audio_text = normalized
+            self._last_audio_text_at_ms = now_ms
+            completed_turns += 1
+            speaker_name, source = await self._caption_attribution(text)
+            await self.ingest_transcript(
+                text,
+                speaker_name=speaker_name,
+                started_at_ms=now_ms,
+                ended_at_ms=now_ms,
+                source=source,
+            )
+
+        async def on_speech_started() -> None:
+            speaking = self.meeting_state == MeetingState.SPEAKING
+            interrupted = await self.audio.interrupt_speech() if speaking else False
+            await self.emit_event(
+                "audio.speech.detected",
+                {
+                    "while_robin_speaking": speaking,
+                    "playback_interrupted": interrupted,
+                },
+                component="audio",
+            )
+            await self.publish()
+
+        while max_iterations is None or completed_turns < max_iterations:
+            transcriber = RealtimeTranscriber(
+                api_key=self.settings.openai_api_key or "",
+                model=self.settings.audio.realtime_transcription_model,
+                delay=self.settings.audio.realtime_transcription_delay,
+                threshold=self.settings.audio.silence_rms_threshold,
+                silence_ms=self.settings.audio.realtime_vad_silence_ms,
+                min_speech_ms=self.settings.audio.realtime_vad_min_speech_ms,
+            )
+            try:
+                await self.emit_event(
+                    "audio.realtime.starting",
+                    {"model": self.settings.audio.realtime_transcription_model},
+                    component="audio",
+                )
+                await transcriber.run(
+                    self.audio.bridge_client.stream_audio(
+                        bundle_id, self.settings.audio.realtime_chunk_bytes
+                    ),
+                    on_partial,
+                    on_final,
+                    on_speech_started,
+                )
+                failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failures += 1
+                await self.emit_event(
+                    "audio.realtime.failed",
+                    {"error": str(exc), "consecutive_failures": failures},
+                    component="audio",
+                )
+                await self.publish()
+                if failures >= 3:
+                    await self.emit_event(
+                        "audio.realtime.fallback",
+                        {"mode": "bounded"},
+                        component="audio",
+                    )
+                    await self._listening_loop(
+                        bundle_id=bundle_id,
+                        duration_ms=self.settings.audio.capture_sample_duration_ms,
+                        interval_ms=self.settings.audio.capture_loop_interval_ms,
+                        max_iterations=max_iterations,
+                    )
+                    return
+                await asyncio.sleep(min(2**failures, 5))
+
+    async def _caption_attribution(self, transcript: str) -> tuple[str, str]:
+        try:
+            captions = await asyncio.wait_for(self.meet.recent_captions(), timeout=0.75)
+        except Exception:
+            return "Meeting audio", "audio_stt"
+        normalized = " ".join(transcript.casefold().split())
+        transcript_tokens = set(normalized.split())
+        best = None
+        best_score = 0.0
+        for caption in captions:
+            caption_text = " ".join(caption.text.casefold().split())
+            caption_tokens = set(caption_text.split())
+            overlap = len(transcript_tokens & caption_tokens) / max(
+                min(len(transcript_tokens), len(caption_tokens)), 1
+            )
+            similarity = SequenceMatcher(None, normalized, caption_text).ratio()
+            score = max(overlap, similarity)
+            if score > best_score:
+                best = caption
+                best_score = score
+        if best is None or best_score < 0.62:
+            return "Meeting audio", "audio_stt"
+        await self.emit_event(
+            "audio.speaker.attributed",
+            {
+                "speaker_name": best.speaker_name,
+                "caption_text": best.text,
+                "match_score": round(best_score, 3),
+            },
+            component="audio",
+        )
+        return best.speaker_name, "merged"
+
+    def _is_recent_robin_echo(self, text: str) -> bool:
+        spoken = self.audio.last_spoken_text
+        if not spoken or int(time.time() * 1000) - self._last_spoken_at_ms > 15_000:
+            return False
+        normalized = " ".join(text.casefold().split())
+        expected = " ".join(spoken.casefold().split())
+        if not normalized or not expected:
+            return False
+        return (
+            normalized in expected
+            or expected in normalized
+            or SequenceMatcher(None, normalized, expected).ratio() >= 0.78
+        )
 
     async def create_task(self, text: str, requester_name: str | None = None) -> RobinTask:
         duplicate = await self._handle_duplicate_task_request(text)
@@ -443,37 +1205,62 @@ class RobinRuntime:
         )
         self.tasks.append(task)
         self.store.upsert("task", task)
-        await self.emit_event("task.created", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
-        await self._acknowledge(f"Got it. I’ll work on {task.title}.")
+        await self.emit_event(
+            "task.created",
+            task.model_dump(mode="json"),
+            task_id=task.id,
+            component="task_orchestrator",
+        )
         self._schedule_task(task)
         await self.publish()
+        self._schedule_acknowledgement(f"Got it. I’ll work on {task.title}.")
         return task
 
     async def cancel_task(self, task_id: UUID) -> None:
         task = self._find_task(task_id)
         task.status = TaskStatus.CANCELLED
         task.updated_at = now_utc()
+        task.outcome_state = TaskOutcomeState.CANCELLED
+        task.outcome_detail = "Cancelled by a meeting participant or operator."
         handle = self._task_handles.get(task_id)
         if handle:
             handle.cancel()
         self.store.upsert("task", task)
-        await self.emit_event("task.cancelled", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+        await self.emit_event(
+            "task.cancelled",
+            task.model_dump(mode="json"),
+            task_id=task.id,
+            component="task_orchestrator",
+        )
         await self._acknowledge(f"Cancelled {task.title}.")
         await self.publish()
 
     async def retry_task(self, task_id: UUID) -> RuntimeSnapshot:
         task = self._find_task(task_id)
-        active_statuses = {TaskStatus.ACCEPTED, TaskStatus.QUEUED, TaskStatus.EXECUTING, TaskStatus.VALIDATING, TaskStatus.PRESENTING}
+        active_statuses = {
+            TaskStatus.ACCEPTED,
+            TaskStatus.QUEUED,
+            TaskStatus.EXECUTING,
+            TaskStatus.VALIDATING,
+            TaskStatus.PRESENTING,
+        }
         if task.status in active_statuses:
             raise ValueError(f"Task is already active: {task.status}")
         task.revision += 1
         task.status = TaskStatus.ACCEPTED
         task.error = None
+        task.outcome_state = TaskOutcomeState.UNVERIFIED
+        task.outcome_detail = None
         task.started_at = None
         task.completed_at = None
         task.updated_at = now_utc()
         self.store.upsert("task", task)
-        await self.emit_event("task.retry", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+        await self.emit_event(
+            "task.retry",
+            task.model_dump(mode="json"),
+            task_id=task.id,
+            component="task_orchestrator",
+        )
         await self._acknowledge(f"Retrying {task.title}.")
         self._schedule_task(task)
         return await self.publish()
@@ -486,31 +1273,79 @@ class RobinRuntime:
         deck_spec = self._load_deck(task_id)
         self.activate_presentation(task_id)
         task.status = TaskStatus.PRESENTING
+        task.outcome_state = TaskOutcomeState.WORKING
+        task.outcome_detail = "Presenting the verified artifact and narrating its findings."
         task.updated_at = now_utc()
         self.store.upsert("task", task)
-        await self.emit_event("presentation.started", {"url": deck.url}, task_id=task.id, component="presentation")
-        await self.meet.start_presenting(deck.url)
-        self.meeting_state = self.meet.state
-        await self._emit_meet_recovery_events(task.id)
-        await self._narrate_deck(task.id, deck_spec)
-        await self.stop_presenting(task.id)
+        await self.emit_event(
+            "presentation.started",
+            {"url": deck.url},
+            task_id=task.id,
+            component="presentation",
+        )
+        try:
+            await self.meet.start_presenting(deck.url)
+            self.meeting_state = self.meet.state
+            await self._emit_meet_recovery_events(task.id)
+            await self._narrate_deck(task.id, deck_spec)
+        except Exception as exc:
+            task.error = str(exc)
+            task.outcome_state = TaskOutcomeState.BLOCKED
+            task.outcome_detail = f"Presentation could not proceed: {exc}"
+            await self.emit_event(
+                "presentation.failed",
+                {"error": str(exc)},
+                task_id=task.id,
+                component="presentation",
+            )
+            raise
+        finally:
+            if self.meet.presenting or self.presentations[task.id].active:
+                await self.stop_presenting(task.id)
         task.status = TaskStatus.COMPLETED
+        task.error = None
+        task.outcome_state = TaskOutcomeState.VERIFIED
+        task.outcome_detail = "Artifact validation and live presentation completed."
         task.completed_at = now_utc()
         task.updated_at = now_utc()
         self.store.upsert("task", task)
-        await self.emit_event("presentation.completed", task.model_dump(mode="json"), task_id=task.id, component="presentation")
+        await self.emit_event(
+            "presentation.completed",
+            task.model_dump(mode="json"),
+            task_id=task.id,
+            component="presentation",
+        )
         return await self.publish()
 
     async def stop_presenting(self, task_id: UUID | None = None) -> RuntimeSnapshot:
         await self.meet.stop_presenting()
         self.meeting_state = self.meet.state
         await self._emit_meet_recovery_events(task_id)
-        target_ids = [task_id] if task_id else list(self.presentations)
+        target_ids = (
+            [task_id]
+            if task_id
+            else list(
+                dict.fromkeys(
+                    [
+                        *self.presentations,
+                        *(task.id for task in self.tasks if task.status == TaskStatus.PRESENTING),
+                    ]
+                )
+            )
+        )
         for current_id in target_ids:
             state = self.presentations.get(current_id)
             if state:
                 state.active = False
                 state.updated_at = now_utc()
+            try:
+                task = self._find_task(current_id)
+            except KeyError:
+                continue
+            if task.status == TaskStatus.PRESENTING:
+                task.status = TaskStatus.READY_TO_PRESENT
+                task.updated_at = now_utc()
+                self.store.upsert("task", task)
         await self.emit_event(
             "presentation.stopped",
             {"task_id": str(task_id) if task_id else None},
@@ -535,7 +1370,9 @@ class RobinRuntime:
         self.presentations[task_id] = state
         return state
 
-    async def navigate_presentation(self, task_id: UUID, action: str, index: int | None = None) -> PresentationSession:
+    async def navigate_presentation(
+        self, task_id: UUID, action: str, index: int | None = None
+    ) -> PresentationSession:
         state = self.presentation_state(task_id)
         if action == "next":
             state.active_slide += 1
@@ -549,7 +1386,12 @@ class RobinRuntime:
             raise ValueError(f"Unknown presentation navigation action: {action}")
         state.active_slide = max(0, min(state.active_slide, max(state.slide_count - 1, 0)))
         state.updated_at = now_utc()
-        await self.emit_event("presentation.updated", state.model_dump(mode="json"), task_id=task_id, component="presentation")
+        await self.emit_event(
+            "presentation.updated",
+            state.model_dump(mode="json"),
+            task_id=task_id,
+            component="presentation",
+        )
         await self.publish()
         return state
 
@@ -572,25 +1414,50 @@ class RobinRuntime:
                 task_id=task_id,
                 component="presentation",
             )
-            await self._acknowledge(speech)
+            record = await self._acknowledge(speech)
+            if record.interrupted:
+                await self.emit_event(
+                    "presentation.narration.interrupted",
+                    {"slide": index},
+                    task_id=task_id,
+                    component="presentation",
+                )
+                break
 
     def _slide_narration(self, deck: DeckSpec, index: int) -> str:
         slide = deck.slides[index]
         if slide.type == "title":
             return f"I’ll walk through {deck.title}. {slide.body[0] if slide.body else ''}".strip()
         if slide.type == "executive_summary":
-            return " ".join(slide.body[:2])
+            return self._spoken_excerpt(" ".join(slide.body[:2]))
         if slide.type == "chart":
-            return f"This chart shows {slide.title.lower()}. {slide.body[0] if slide.body else ''}".strip()
+            return self._spoken_excerpt(
+                f"This chart shows {slide.title.lower()}. {slide.body[0] if slide.body else ''}".strip()
+            )
         if slide.type == "key_metrics":
             metrics = list(slide.metrics.items())[:3]
             if metrics:
-                return "Key metrics: " + "; ".join(f"{label} is {value}" for label, value in metrics) + "."
+                return (
+                    "Key metrics: "
+                    + "; ".join(f"{label} is {value}" for label, value in metrics)
+                    + "."
+                )
             return f"Here are the key metrics for {deck.title}."
         if slide.type == "sources":
             source_names = ", ".join(source.label for source in deck.sources[:3])
             return f"I used {source_names} and validated the derived figures before presenting."
-        return " ".join(slide.body[:2]) or slide.title
+        return self._spoken_excerpt(" ".join(slide.body[:2]) or slide.title)
+
+    @staticmethod
+    def _spoken_excerpt(text: str, max_chars: int = 260) -> str:
+        compact = " ".join(text.split())
+        if len(compact) <= max_chars:
+            return compact
+        candidate = compact[: max_chars + 1]
+        boundary = max(candidate.rfind(". "), candidate.rfind("; "))
+        if boundary >= 15:
+            return candidate[: boundary + 1]
+        return candidate[: max_chars - 1].rstrip(" ,;:") + "."
 
     async def _handle_intent(self, segment: TranscriptSegment) -> None:
         if await self._handle_pending_confirmation(segment):
@@ -599,8 +1466,13 @@ class RobinRuntime:
             return
         active = self._active_tasks()
         intent = await self.intent.classify(segment.text, active)
-        if intent.classification in {"direct_request", "confirmed_task"} and intent.confidence >= self.settings.model.intent_confidence_accept:
-            await self.emit_event("intent.detected", intent.model_dump(mode="json"), component="conversation")
+        if (
+            intent.classification in {"direct_request", "confirmed_task"}
+            and intent.confidence >= self.settings.model.intent_confidence_accept
+        ):
+            await self.emit_event(
+                "intent.detected", intent.model_dump(mode="json"), component="conversation"
+            )
             task = RobinTask(
                 meeting_id=self.meeting_id,
                 title=intent.task_title or segment.text[:80],
@@ -613,17 +1485,34 @@ class RobinRuntime:
             )
             self.tasks.append(task)
             self.store.upsert("task", task)
-            await self.emit_event("task.created", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
-            await self._acknowledge("Got it. I’ll analyze the files and prepare a short deck.")
+            await self.emit_event(
+                "task.created",
+                task.model_dump(mode="json"),
+                task_id=task.id,
+                component="task_orchestrator",
+            )
             self._schedule_task(task)
             await self.publish()
+            self._schedule_acknowledgement(
+                "Got it. I’ll analyze the files and prepare a short deck."
+            )
         elif intent.classification == "task_modification" and intent.referenced_task_id:
             task = self._find_task(intent.referenced_task_id)
             task.revision += 1
             task.constraints = sorted(set(task.constraints + intent.constraints + [segment.text]))
+            task.outcome_state = TaskOutcomeState.UNVERIFIED
+            task.outcome_detail = (
+                "Revision requested; prior verification no longer covers the updated task."
+            )
+            task.source_context_segment_ids.append(segment.id)
             task.updated_at = now_utc()
             self.store.upsert("task", task)
-            await self.emit_event("task.updated", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+            await self.emit_event(
+                "task.updated",
+                task.model_dump(mode="json"),
+                task_id=task.id,
+                component="task_orchestrator",
+            )
             await self._acknowledge("Understood. I’ll apply that update to the active task.")
             handle = self._task_handles.get(task.id)
             if handle and not handle.done():
@@ -635,12 +1524,29 @@ class RobinRuntime:
         elif intent.classification == "status_request":
             summary = self._status_summary()
             await self._acknowledge(summary)
+        elif intent.classification == "conversation_request":
+            await self.emit_event(
+                "conversation.addressed",
+                {"text": segment.text},
+                component="conversation",
+            )
+            await self._acknowledge(
+                await self.intent.respond(
+                    segment.text,
+                    self._active_tasks(),
+                    self._meeting_context(),
+                    self._memory_context(),
+                    self._conversation_artifact_context(),
+                )
+            )
         elif intent.should_ask_confirmation and intent.clarification_question:
             task = RobinTask(
                 meeting_id=self.meeting_id,
                 title=intent.task_title or segment.text[:80],
                 requester_name=segment.speaker_name,
                 status=TaskStatus.AWAITING_CLARIFICATION,
+                outcome_state=TaskOutcomeState.AWAITING_CONFIRMATION,
+                outcome_detail=intent.clarification_question,
                 request_text=segment.text,
                 requested_outcome=intent.requested_outcome or segment.text,
                 constraints=intent.constraints,
@@ -655,15 +1561,35 @@ class RobinRuntime:
                 task_id=task.id,
                 component="conversation",
             )
-            await self.emit_event("task.created", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
-            await self.emit_event("task.awaiting_clarification", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+            await self.emit_event(
+                "task.created",
+                task.model_dump(mode="json"),
+                task_id=task.id,
+                component="task_orchestrator",
+            )
+            await self.emit_event(
+                "task.awaiting_clarification",
+                task.model_dump(mode="json"),
+                task_id=task.id,
+                component="task_orchestrator",
+            )
             await self._acknowledge(intent.clarification_question)
 
     async def _handle_pending_confirmation(self, segment: TranscriptSegment) -> bool:
         if not self._pending_confirmation:
             return False
         lowered = segment.text.strip().lower()
-        accepts = {"yes", "yeah", "yep", "please do", "go ahead", "do it", "take it", "sounds good", "correct"}
+        accepts = {
+            "yes",
+            "yeah",
+            "yep",
+            "please do",
+            "go ahead",
+            "do it",
+            "take it",
+            "sounds good",
+            "correct",
+        }
         declines = {"no", "nope", "never mind", "cancel", "don't", "do not", "ignore that"}
         is_accept = any(phrase in lowered for phrase in accepts)
         is_decline = any(phrase in lowered for phrase in declines)
@@ -674,6 +1600,8 @@ class RobinRuntime:
         task = self._find_task(task_id)
         if is_decline:
             task.status = TaskStatus.CANCELLED
+            task.outcome_state = TaskOutcomeState.CANCELLED
+            task.outcome_detail = "The proposed task was declined."
             task.updated_at = now_utc()
             task.source_context_segment_ids.append(segment.id)
             self.store.upsert("task", task)
@@ -683,25 +1611,43 @@ class RobinRuntime:
                 task_id=task.id,
                 component="conversation",
             )
-            await self.emit_event("task.cancelled", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+            await self.emit_event(
+                "task.cancelled",
+                task.model_dump(mode="json"),
+                task_id=task.id,
+                component="task_orchestrator",
+            )
             await self._acknowledge("Okay, I will leave that alone.")
             await self.publish()
             return True
         duplicate = await self._handle_duplicate_task_request(original.text)
         if duplicate:
             task.status = TaskStatus.CANCELLED
+            task.outcome_state = TaskOutcomeState.CANCELLED
+            task.outcome_detail = "A duplicate confirmed task was suppressed."
             task.updated_at = now_utc()
             task.source_context_segment_ids.append(segment.id)
             self.store.upsert("task", task)
-            await self.emit_event("task.cancelled", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+            await self.emit_event(
+                "task.cancelled",
+                task.model_dump(mode="json"),
+                task_id=task.id,
+                component="task_orchestrator",
+            )
             await self.emit_event(
                 "clarification.accepted",
-                {"original_text": original.text, "answer": segment.text, "duplicate_task_id": str(duplicate.id)},
+                {
+                    "original_text": original.text,
+                    "answer": segment.text,
+                    "duplicate_task_id": str(duplicate.id),
+                },
                 task_id=duplicate.id,
                 component="conversation",
             )
             return True
         task.status = TaskStatus.ACCEPTED
+        task.outcome_state = TaskOutcomeState.UNVERIFIED
+        task.outcome_detail = None
         task.requested_outcome = intent.requested_outcome or original.text
         task.constraints = intent.constraints
         task.updated_at = now_utc()
@@ -713,7 +1659,12 @@ class RobinRuntime:
             task_id=task.id,
             component="conversation",
         )
-        await self.emit_event("task.accepted", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+        await self.emit_event(
+            "task.accepted",
+            task.model_dump(mode="json"),
+            task_id=task.id,
+            component="task_orchestrator",
+        )
         await self._acknowledge("Got it. I’ll take that on.")
         self._schedule_task(task)
         await self.publish()
@@ -746,7 +1697,10 @@ class RobinRuntime:
             TaskStatus.PRESENTING,
         }
         for task in sorted(self.tasks, key=lambda item: item.updated_at, reverse=True):
-            if task.status in duplicate_statuses and self._normalize_task_text(task.request_text) == normalized:
+            if (
+                task.status in duplicate_statuses
+                and self._normalize_task_text(task.request_text) == normalized
+            ):
                 return task
         return None
 
@@ -775,77 +1729,277 @@ class RobinRuntime:
         try:
             if self.task_slots.locked():
                 task.status = TaskStatus.QUEUED
+                task.outcome_state = TaskOutcomeState.WORKING
+                task.outcome_detail = "Waiting for an available bounded task slot."
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
-                await self.emit_event("task.queued", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+                await self.emit_event(
+                    "task.queued",
+                    task.model_dump(mode="json"),
+                    task_id=task.id,
+                    component="task_orchestrator",
+                )
                 await self.publish()
             async with self.task_slots:
+                violations = self._resource_budget_violations()
+                if violations:
+                    raise RuntimeError("Robin resource budget exceeded: " + "; ".join(violations))
                 task.status = TaskStatus.EXECUTING
+                task.outcome_state = TaskOutcomeState.WORKING
+                task.outcome_detail = (
+                    "The general agent is inspecting sources and producing the requested output."
+                )
                 task.started_at = task.started_at or now_utc()
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
-                await self.emit_event("task.started", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+                await self.emit_event(
+                    "task.started",
+                    task.model_dump(mode="json"),
+                    task_id=task.id,
+                    component="task_orchestrator",
+                )
                 await self.publish()
                 records = self.workspace.index()
                 self.files = records
                 self.store.replace_all("file", records)
-                files = [self.workspace.resolve(record.relative_path) for record in self.workspace.search(task.requested_outcome, records)]
-                artifacts, _chart, _deck, validation = await asyncio.to_thread(self.artifacts_worker.run_finance_analysis, task, files)
+                if self.task_agent.client:
+
+                    async def report_agent_progress(event_type: str, payload: dict) -> None:
+                        await self.emit_event(
+                            event_type,
+                            payload,
+                            task_id=task.id,
+                            component="general_agent",
+                        )
+                        await self.publish()
+
+                    await self.emit_event(
+                        "agent.started",
+                        {"model": self.settings.model.primary, "file_count": len(records)},
+                        task_id=task.id,
+                        component="general_agent",
+                    )
+                    result = await self.task_agent.execute(
+                        task,
+                        records,
+                        meeting_context=self._meeting_context(task.meeting_id),
+                        memory_context=self._memory_context(task.meeting_id),
+                        progress=report_agent_progress,
+                    )
+                    artifacts, _deck, validation = await asyncio.to_thread(
+                        self.artifacts_worker.write_agent_result, task, result
+                    )
+                else:
+                    # Simulator/offline tests retain the deterministic fixture worker. Real partner
+                    # mode always has OPENAI_API_KEY and therefore uses the general tool loop above.
+                    files = [
+                        self.workspace.resolve(record.relative_path)
+                        for record in self.workspace.search(task.requested_outcome, records)
+                    ]
+                    artifacts, _chart, _deck, validation = await asyncio.to_thread(
+                        self.artifacts_worker.run_finance_analysis, task, files
+                    )
                 task.status = TaskStatus.VALIDATING
+                task.outcome_state = TaskOutcomeState.WORKING
+                task.outcome_detail = (
+                    "Checking citations, structure, calculations, and artifact readiness."
+                )
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
-                await self.emit_event("task.validating", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+                await self.emit_event(
+                    "task.validating",
+                    task.model_dump(mode="json"),
+                    task_id=task.id,
+                    component="task_orchestrator",
+                )
                 await self.publish()
                 for artifact in artifacts:
                     self.artifacts.append(artifact)
                     self.store.upsert("artifact", artifact)
-                    await self.emit_event("artifact.created", artifact.model_dump(mode="json"), task_id=task.id, component="artifact_worker")
+                    await self.emit_event(
+                        "artifact.created",
+                        artifact.model_dump(mode="json"),
+                        task_id=task.id,
+                        component="artifact_worker",
+                    )
                 if not validation.ok:
                     failed_checks = [check.name for check in validation.checks if not check.ok]
                     task.status = TaskStatus.FAILED
                     task.error = f"Validation failed: {', '.join(failed_checks)}"
+                    task.outcome_state = TaskOutcomeState.FAILED
+                    task.outcome_detail = task.error
                     task.updated_at = now_utc()
                     self.store.upsert("task", task)
-                    await self.emit_event("task.failed", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
-                    await self._acknowledge("I found a validation issue in the analysis, so I will not present it yet.")
+                    await self.emit_event(
+                        "task.failed",
+                        task.model_dump(mode="json"),
+                        task_id=task.id,
+                        component="task_orchestrator",
+                    )
+                    await self._acknowledge(
+                        "I found a validation issue in the analysis, so I will not present it yet."
+                    )
                     await self.publish()
                     return
                 task.status = TaskStatus.READY_TO_PRESENT
+                task.outcome_state = TaskOutcomeState.VERIFIED
+                task.outcome_detail = "Grounding, citations, and artifact validation passed."
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
-                await self.emit_event("task.completed", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
-                await self._acknowledge("The analysis and slides are ready.")
+                await self.emit_event(
+                    "task.completed",
+                    task.model_dump(mode="json"),
+                    task_id=task.id,
+                    component="task_orchestrator",
+                )
                 await self.publish()
+                await self._safe_acknowledge("The analysis and slides are ready.")
         except asyncio.CancelledError:
             task.status = TaskStatus.CANCELLED
+            task.outcome_state = TaskOutcomeState.CANCELLED
+            task.outcome_detail = "Execution was cancelled before verification."
             task.updated_at = now_utc()
             self.store.upsert("task", task)
-            await self.emit_event("task.cancelled", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+            await self.emit_event(
+                "task.cancelled",
+                task.model_dump(mode="json"),
+                task_id=task.id,
+                component="task_orchestrator",
+            )
             await self.publish()
         except Exception as exc:
             task.status = TaskStatus.FAILED
             task.error = str(exc)
+            if self._is_recoverable_task_blocker(exc):
+                task.outcome_state = TaskOutcomeState.BLOCKED
+                task.outcome_detail = f"Retryable blocker: {exc}"
+            else:
+                task.outcome_state = TaskOutcomeState.FAILED
+                task.outcome_detail = str(exc)
             task.updated_at = now_utc()
             self.store.upsert("task", task)
-            await self.emit_event("task.failed", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
-            await self._acknowledge(self._task_failure_acknowledgement(task))
+            await self.emit_event(
+                "task.failed",
+                task.model_dump(mode="json"),
+                task_id=task.id,
+                component="task_orchestrator",
+            )
+            await self.publish()
+            await self._safe_acknowledge(self._task_failure_acknowledgement(task))
+
+    @staticmethod
+    def _is_recoverable_task_blocker(exc: Exception) -> bool:
+        if isinstance(exc, (TimeoutError, ConnectionError)):
+            return True
+        text = str(exc).casefold()
+        return any(
+            marker in text
+            for marker in (
+                "resource budget exceeded",
+                "not reachable",
+                "connection",
+                "temporarily unavailable",
+                "timed out",
+                "browser",
+                "renderer",
+                "permission",
+            )
+        )
+
+    def _meeting_context(self, meeting_id: UUID | None = None) -> list[TranscriptSegment]:
+        target = meeting_id or self.meeting_id
+        return [segment for segment in self.transcript if segment.meeting_id == target][-30:]
+
+    def _memory_context(self, meeting_id: UUID | None = None) -> list[MeetingMemoryItem]:
+        target = meeting_id or self.meeting_id
+        return [item for item in self.meeting_memory if item.meeting_id == target][-60:]
+
+    def _conversation_artifact_context(self) -> list[dict]:
+        contexts: list[dict] = []
+        tasks = sorted(self.tasks, key=lambda task: task.updated_at, reverse=True)
+        for task in tasks:
+            deck_artifact = self._latest_artifact(task.id, "deck_json")
+            if deck_artifact is None:
+                continue
+            try:
+                deck = DeckSpec.model_validate_json(
+                    self.workspace.resolve(deck_artifact.path).read_text(encoding="utf-8")
+                )
+            except Exception:
+                continue
+            contexts.append(
+                {
+                    "task_id": str(task.id),
+                    "title": task.title[:160],
+                    "revision": task.revision,
+                    "outcome_state": task.outcome_state,
+                    "outcome_detail": (task.outcome_detail or "")[:300],
+                    "slides": [
+                        {
+                            "title": slide.title[:160],
+                            "body": [item[:400] for item in slide.body[:2]],
+                            "metrics": dict(list(slide.metrics.items())[:6]),
+                        }
+                        for slide in deck.slides[:8]
+                        if slide.type != "sources"
+                    ],
+                    "sources": [
+                        {"label": source.label[:160], "path": source.path[:300]}
+                        for source in deck.sources[:12]
+                    ],
+                }
+            )
+            if len(contexts) >= 3:
+                break
+        return contexts
+
+    def _schedule_acknowledgement(self, text: str) -> None:
+        handle = asyncio.create_task(self._safe_acknowledge(text))
+        self._speech_handles.add(handle)
+        handle.add_done_callback(self._speech_handles.discard)
+
+    async def _safe_acknowledge(self, text: str) -> None:
+        try:
+            await self._acknowledge(text)
+        except Exception as exc:
+            await self.emit_event(
+                "speech.failed",
+                {"text": text[:120], "error": str(exc)},
+                component="speech",
+            )
             await self.publish()
 
-    async def _acknowledge(self, text: str) -> None:
-        previous = self.meeting_state
-        await self._wait_for_speech_floor(text)
-        self.meeting_state = MeetingState.SPEAKING
-        await self.meet.unmute()
-        await self._emit_meet_recovery_events()
+    async def _acknowledge(self, text: str) -> SpeechRecord:
+        async with self._speech_lock:
+            previous = self.meeting_state
+            await self._wait_for_speech_floor(text)
+            self.meeting_state = MeetingState.SPEAKING
+            await self.publish()
+            try:
+                await self.meet.unmute()
+                await self._emit_meet_recovery_events()
+                return await self._speak_and_record(text)
+            finally:
+                self._last_spoken_at_ms = int(time.time() * 1000)
+                await self.meet.mute()
+                await self._emit_meet_recovery_events()
+                self.meeting_state = previous if previous != MeetingState.IDLE else self.meet.state
+                await self.publish()
+
+    async def _speak_and_record(self, text: str) -> SpeechRecord:
         speech = await self.audio.speak(text)
         if speech.path:
-            speech.path = (Path(self.settings.workspace.sessions_dir) / "speech" / speech.path).as_posix()
+            speech.path = (
+                Path(self.settings.workspace.sessions_dir) / "speech" / speech.path
+            ).as_posix()
         self.speech.append(speech)
         self.store.upsert("speech", speech)
-        await self.meet.mute()
-        await self._emit_meet_recovery_events()
-        self.meeting_state = previous if previous != MeetingState.IDLE else self.meet.state
-        await self.emit_event("speech.completed", speech.model_dump(mode="json"), component="speech")
+        await self.emit_event(
+            "speech.interrupted" if speech.interrupted else "speech.completed",
+            speech.model_dump(mode="json"),
+            component="speech",
+        )
+        return speech
 
     async def _wait_for_speech_floor(self, text: str) -> None:
         wait_ms = self._speech_floor_wait_ms()
@@ -892,7 +2046,9 @@ class RobinRuntime:
         active = self._active_tasks()
         if not active:
             return "I do not have an active task right now."
-        return "; ".join(f"{task.title}: {task.status.value.lower().replace('_', ' ')}" for task in active[:2])
+        return "; ".join(
+            f"{task.title}: {task.status.value.lower().replace('_', ' ')}" for task in active[:2]
+        )
 
     def _find_task(self, task_id: UUID) -> RobinTask:
         for task in self.tasks:
@@ -902,7 +2058,12 @@ class RobinRuntime:
 
     def _active_tasks(self) -> list[RobinTask]:
         return sorted(
-            (task for task in self.tasks if task.status not in {TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED}),
+            (
+                task
+                for task in self.tasks
+                if task.status
+                not in {TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED}
+            ),
             key=lambda task: task.updated_at,
             reverse=True,
         )
@@ -911,7 +2072,11 @@ class RobinRuntime:
         return self.workspace.resolve(relative_path)
 
     def _latest_artifact(self, task_id: UUID, artifact_type: str) -> Artifact | None:
-        artifacts = [artifact for artifact in self.artifacts if artifact.task_id == task_id and artifact.type == artifact_type]
+        artifacts = [
+            artifact
+            for artifact in self.artifacts
+            if artifact.task_id == task_id and artifact.type == artifact_type
+        ]
         if not artifacts:
             return None
         return max(artifacts, key=lambda artifact: (artifact.revision, artifact.created_at))
@@ -928,7 +2093,7 @@ class RobinRuntime:
             meeting_id=self.meeting_id,
             task_id=task_id,
             component=component,
-            payload=payload,
+            payload=redact_value(payload),
         )
         event.id = self.store.append_event_body(event.type, event.model_dump(mode="json"))
         self._write_trace(event)
@@ -964,6 +2129,11 @@ class RobinRuntime:
 
     def metrics(self) -> RuntimeMetrics:
         events = self.recent_events(500)
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        rss_bytes = usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
+        workspace_bytes = sum(
+            path.stat().st_size for path in self.workspace.root.rglob("*") if path.is_file()
+        )
         active_statuses = {
             TaskStatus.AWAITING_CLARIFICATION,
             TaskStatus.ACCEPTED,
@@ -973,19 +2143,70 @@ class RobinRuntime:
             TaskStatus.READY_TO_PRESENT,
             TaskStatus.PRESENTING,
         }
+        violations = self._resource_budget_violations(
+            peak_rss_mb=rss_bytes / 1024 / 1024,
+            workspace_disk_mb=workspace_bytes / 1024 / 1024,
+        )
         return RuntimeMetrics(
             event_count=len(events),
             transcript_count=len(self.transcript),
             task_count=len(self.tasks),
-            completed_task_count=sum(1 for task in self.tasks if task.status == TaskStatus.COMPLETED),
+            completed_task_count=sum(
+                1 for task in self.tasks if task.status == TaskStatus.COMPLETED
+            ),
             failed_task_count=sum(1 for task in self.tasks if task.status == TaskStatus.FAILED),
             active_task_count=sum(1 for task in self.tasks if task.status in active_statuses),
             artifact_count=len(self.artifacts),
             speech_count=len(self.speech),
             presentation_count=len(self.presentations),
-            audio_capture_event_count=sum(1 for event in events if event.type.startswith("audio.capture")),
+            audio_capture_event_count=sum(
+                1 for event in events if event.type.startswith("audio.capture")
+            ),
             direct_request_count=sum(1 for event in events if event.type == "task.created"),
+            agent_tool_call_count=sum(
+                1 for event in events if event.type == "agent.tool.completed"
+            ),
+            recovery_event_count=sum(1 for event in events if ".recovery." in event.type),
+            realtime_failure_count=sum(
+                1 for event in events if event.type == "audio.realtime.failed"
+            ),
+            uptime_seconds=round(time.monotonic() - self._started_monotonic, 1),
+            process_cpu_seconds=round(usage.ru_utime + usage.ru_stime, 2),
+            peak_rss_mb=round(rss_bytes / 1024 / 1024, 1),
+            workspace_disk_mb=round(workspace_bytes / 1024 / 1024, 1),
+            resource_budget_ok=not violations,
+            resource_budget_violations=violations,
         )
+
+    def _resource_budget_violations(
+        self,
+        peak_rss_mb: float | None = None,
+        workspace_disk_mb: float | None = None,
+    ) -> list[str]:
+        if peak_rss_mb is None:
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            rss_bytes = usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
+            peak_rss_mb = rss_bytes / 1024 / 1024
+        if workspace_disk_mb is None:
+            workspace_disk_mb = (
+                sum(
+                    path.stat().st_size for path in self.workspace.root.rglob("*") if path.is_file()
+                )
+                / 1024
+                / 1024
+            )
+        violations: list[str] = []
+        if peak_rss_mb > self.settings.runtime.max_peak_rss_mb:
+            violations.append(
+                f"peak memory {peak_rss_mb:.1f} MB exceeds "
+                f"{self.settings.runtime.max_peak_rss_mb} MB"
+            )
+        if workspace_disk_mb > self.settings.runtime.max_workspace_disk_mb:
+            violations.append(
+                f"workspace {workspace_disk_mb:.1f} MB exceeds "
+                f"{self.settings.runtime.max_workspace_disk_mb} MB"
+            )
+        return violations
 
     def _write_trace(self, event: EventEnvelope) -> None:
         trace_dir = self.workspace.sessions / "traces"

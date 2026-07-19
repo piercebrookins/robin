@@ -1,8 +1,8 @@
 # Robin Technical Design Document
 
 **Product:** Robin  
-**Version:** 0.1  
-**Status:** Hackathon MVP Design  
+**Version:** 0.2
+**Status:** Implemented in part; completion audit remains open
 **Platform:** Dedicated macOS host  
 **Primary meeting platform:** Google Meet  
 **Related document:** `Robin_PRD.md`  
@@ -19,11 +19,48 @@ The MVP is a hybrid agent system rather than a pure visual computer-use loop:
 - **GPT-5.6** performs meeting reasoning, intent classification, planning, tool selection, validation, and visual recovery.
 - **Playwright and CDP** perform repeatable Google Meet and browser interactions.
 - **A Swift macOS bridge** captures application audio, routes synthesized speech into Google Meet, and handles native UI surfaces that browser automation cannot access.
-- **Python workers** search files, analyze data, generate charts, and create slide specifications.
+- **A bounded Responses API agent loop** lets GPT-5.6 list and read approved source files,
+  then submit a cited structured deliverable.
+- **Python artifact workers** validate the model result and render Markdown, JSON, and PPTX.
 - **A Next.js web application** provides the operator dashboard and renders presentations that Robin can share.
 - **SQLite** stores local session, transcript, task, artifact, and health state.
 
-Robin runs as a persistent macOS LaunchAgent in a dedicated logged-in user session. The application is fully autonomous after launch on a pre-provisioned Mac.
+Robin runs in a dedicated logged-in macOS session. The one-command local workflow, realtime
+transcription/barge-in, durable sourced memory, semantic browser operator, exact approval tokens,
+secret redaction, resource budgets, streaming PCM speech, caption/STT speaker merging, bounded CDP
+reconnection/target reopening, grounded artifact Q&A, a full emergency kill switch, and explicit
+task outcome states are implemented. Full autonomy is not yet proven:
+reliable named-speaker attribution without caption metadata, rich-format editing, broader native
+computer tools, and three qualifying real-Meet rehearsals remain open.
+
+### 1.1 Implemented General-Agent Boundary
+
+`GeneralTaskAgent` uses the Responses API function-calling loop and exposes four workspace functions:
+
+1. `list_workspace_files(query)` returns bounded metadata for approved source files.
+2. `read_workspace_file(path)` resolves only indexed paths beneath `source-data/`, extracts
+   bounded structured content, and marks the result as untrusted.
+3. `create_deliverable(...)` submits a 3–8 slide cited result.
+4. `write_generated_file(name, content)` creates or revises a bounded Markdown, text, JSON, or CSV
+   artifact beneath the active task's generated directory.
+
+The runtime rejects unindexed paths, citations to unread sources, missing citations, missing
+source slides, oversized iteration counts, and structurally invalid deliverables. It persists the
+agent trace and validation evidence alongside the deck, PPTX, and Markdown report. With no API key,
+simulator tests use the old deterministic finance fixture; this is not the real partner-mode path.
+Generated-file writes reject traversal, source-file mutation, executable extensions, and content
+over 100 KB; audit arguments omit the file body.
+
+Separately, `BrowserOperatorAgent` exposes semantic `inspect`, `click`, `fill`, workspace-scoped
+`upload`, isolated `download`, and `finish` tools.
+Every page is re-inspected after an action. Password input is forbidden, page content is marked
+untrusted, and consequential controls require an exact confirmation token cryptographically bound
+to the current page, action, element reference, field name, and arguments. Native Computer Use is
+kept behind the narrower Chrome share-picker adapter because browser APIs cannot access that UI.
+
+Direct meeting Q&A receives a bounded view of the three newest validated decks: task outcome,
+revision, slide claims/metrics, and cited source labels/paths. The response policy may use only that
+validated context plus recent transcript and durable memory, and must state when evidence is absent.
 
 ---
 
@@ -70,14 +107,18 @@ Robin does not depend on a private or hidden meeting integration. It joins, mute
 
 ### 3.3 Model Boundary
 
-`gpt-5.6` is the primary reasoning and computer-use model.
+`gpt-5.6` is the primary intent, conversational-response, and general task-agent model.
 
 GPT-5.6 does not directly accept or emit audio in the same request path. The audio pipeline therefore uses specialized OpenAI speech services:
 
-- Realtime transcription model for streaming speech-to-text
-- OpenAI text-to-speech model for voice output
+- `gpt-4o-mini-transcribe` for the current bounded audio transcription windows
+- `gpt-4o-mini-tts` with the `alloy` voice for voice output
 
-This still keeps the agent’s reasoning, decisions, planning, and computer operation centered on GPT-5.6.
+The workspace and semantic browser tool loops are implemented. Realtime transcription uses
+`gpt-realtime-whisper` with server VAD and incremental deltas; bounded file transcription remains
+available for diagnostics. TTS uses `gpt-4o-mini-tts` chunk-transfer PCM streaming into the native
+bridge. Playback begins on the first chunk while the runtime simultaneously preserves a WAV audit
+artifact; the speech record stores first-audio latency and the verified route.
 
 ### 3.4 Pre-Provisioning
 
@@ -480,6 +521,11 @@ Any non-terminal state:
   -> FAILED
 ```
 
+Task execution status and outcome state are persisted separately. Outcome state is one of
+`UNVERIFIED`, `WORKING`, `AWAITING_CONFIRMATION`, `BLOCKED`, `FAILED`, `VERIFIED`, or `CANCELLED`.
+This lets a validated artifact remain `READY_TO_PRESENT` while a recoverable Meet or dialog problem
+is truthfully shown as `BLOCKED`.
+
 ### 10.4 Speech State
 
 ```text
@@ -591,6 +637,10 @@ The recovery loop receives:
 - Known window geometry
 
 The model returns one bounded action at a time. After each action, Robin captures a new screenshot and verifies progress.
+
+The implemented production boundary is narrower than this intended recovery design: controlled
+macOS automation is currently used for Chrome's native screen-share picker, with PID/window
+pinning, screenshots, and an action trace. Arbitrary model-directed desktop recovery remains open.
 
 ### 11.3 Meet Adapter Interface
 
@@ -759,7 +809,9 @@ For performance, the production IPC implementation should use binary frames. JSO
 
 ### 13.3 Realtime Transcription
 
-`robin-core` creates one realtime transcription session per meeting.
+`robin-core` creates realtime transcription sessions over bounded native capture windows and emits
+incremental deltas plus stabilized final segments. Server VAD is enabled. The current bridge still
+provides bounded WAV capture rather than a single meeting-long binary PCM IPC stream.
 
 Recommended connection:
 
@@ -818,7 +870,7 @@ Suppression should not discard other participants who interrupt Robin. During pl
 
 ### 14.1 Speech Generation
 
-`robin-core` sends concise text to the OpenAI speech endpoint and requests streaming PCM or WAV.
+`robin-core` sends concise text to the OpenAI speech endpoint and requests streaming raw PCM.
 
 Preferred output:
 
@@ -826,7 +878,9 @@ Preferred output:
 24 kHz PCM, mono, 16-bit
 ```
 
-Streaming allows playback to begin before the full response is generated.
+The Swift bridge polls the growing PCM stream, schedules buffers on BlackHole, and restores the
+previous output route after drain or interruption. Python writes the same PCM into a WAV audit
+artifact without delaying first playback.
 
 ### 14.2 Virtual Microphone Routing
 
@@ -1920,6 +1974,22 @@ Emergency stop must:
 6. Leave the meeting when possible.
 7. Preserve logs and session state.
 8. Disable auto-restart until manually reset.
+
+The runtime implementation interrupts native playback first, stops and awaits listening, task,
+speech, and memory handles, disables calendar auto-join, stops sharing, forcibly deactivates every
+presentation session, cancels nonterminal tasks with a persisted outcome, stops capture, and leaves
+Meet. Individual cleanup failures are retained on `runtime.emergency_stop` rather than preventing
+the remaining shutdown actions.
+
+### 29.3 Real-rehearsal certification
+
+After the meeting has ended, `POST /api/rehearsals/confirm` accepts the second participant's exact
+outcome checklist and task identifier. The runtime independently requires meeting-audio STT,
+completed BlackHole playback, a verified task and validation report, observable presentation start
+and completion, narration of every slide, Q&A or revision, meeting leave, and restored inactive
+capture/presentation state. Evidence is stored outside resettable session data under
+`RobinWorkspace/rehearsals/`. Consecutive progress additionally requires a new runtime instance and
+a different normalized task request; any failed or duplicate certification resets the streak.
 
 ---
 

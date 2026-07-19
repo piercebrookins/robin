@@ -52,6 +52,16 @@ class TaskStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+class TaskOutcomeState(StrEnum):
+    UNVERIFIED = "UNVERIFIED"
+    WORKING = "WORKING"
+    AWAITING_CONFIRMATION = "AWAITING_CONFIRMATION"
+    BLOCKED = "BLOCKED"
+    FAILED = "FAILED"
+    VERIFIED = "VERIFIED"
+    CANCELLED = "CANCELLED"
+
+
 class HealthItem(BaseModel):
     name: str
     ok: bool
@@ -72,6 +82,28 @@ class TranscriptSegment(BaseModel):
     created_at: datetime = Field(default_factory=now_utc)
 
 
+class MeetingMemoryItem(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    meeting_id: UUID
+    kind: Literal[
+        "topic",
+        "reference",
+        "decision",
+        "objection",
+        "question",
+        "commitment",
+        "correction",
+    ]
+    text: str
+    speaker_name: str | None = None
+    owner: str | None = None
+    deadline: str | None = None
+    status: Literal["active", "resolved", "superseded", "cancelled"] = "active"
+    source_segment_ids: list[UUID] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
+
+
 class MeetingIntent(BaseModel):
     classification: Literal[
         "non_task",
@@ -82,6 +114,7 @@ class MeetingIntent(BaseModel):
         "task_modification",
         "task_cancellation",
         "status_request",
+        "conversation_request",
     ]
     confidence: float
     addressed_to_robin: bool
@@ -112,6 +145,8 @@ class RobinTask(BaseModel):
     completed_at: datetime | None = None
     parent_task_id: UUID | None = None
     error: str | None = None
+    outcome_state: TaskOutcomeState = TaskOutcomeState.UNVERIFIED
+    outcome_detail: str | None = None
 
 
 class FileIndexRecord(BaseModel):
@@ -161,7 +196,9 @@ class SourceCitation(BaseModel):
 
 
 class SlideSpec(BaseModel):
-    type: Literal["title", "executive_summary", "chart", "key_metrics", "findings", "methodology", "sources"]
+    type: Literal[
+        "title", "executive_summary", "chart", "key_metrics", "findings", "methodology", "sources"
+    ]
     title: str
     body: list[str] = Field(default_factory=list)
     chart_id: UUID | None = None
@@ -196,11 +233,36 @@ class ValidationReport(BaseModel):
     generated_at: datetime = Field(default_factory=now_utc)
 
 
+class AgentDeliverable(BaseModel):
+    title: str
+    summary: str
+    slides: list[SlideSpec]
+    sources: list[SourceCitation]
+
+
+class AgentExecutionResult(BaseModel):
+    deliverable: AgentDeliverable
+    model: str
+    iterations: int
+    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    source_paths: list[str] = Field(default_factory=list)
+    generated_paths: list[str] = Field(default_factory=list)
+
+
 class Artifact(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     task_id: UUID
     revision: int = 1
-    type: Literal["chart_json", "chart_png", "deck_json", "deck_pptx", "validation_json"]
+    type: Literal[
+        "chart_json",
+        "chart_png",
+        "deck_json",
+        "deck_pptx",
+        "validation_json",
+        "report_markdown",
+        "agent_result_json",
+        "generated_file",
+    ]
     path: str
     url: str | None = None
     created_at: datetime = Field(default_factory=now_utc)
@@ -215,9 +277,15 @@ class SpeechRecord(BaseModel):
     format: str
     path: str | None = None
     byte_count: int = 0
+    duration_seconds: float | None = None
+    playback_device: str | None = None
+    playback_route: str | None = None
     started_at: datetime = Field(default_factory=now_utc)
     completed_at: datetime | None = None
     error: str | None = None
+    interrupted: bool = False
+    streaming: bool = False
+    time_to_first_audio_ms: int | None = None
 
 
 class PresentationSession(BaseModel):
@@ -226,6 +294,36 @@ class PresentationSession(BaseModel):
     slide_count: int = 0
     active: bool = False
     updated_at: datetime = Field(default_factory=now_utc)
+
+
+class RehearsalConfirmationRequest(BaseModel):
+    task_id: UUID
+    participant_name: str = Field(min_length=1, max_length=160)
+    robin_heard_participant: bool
+    correct_understanding: bool
+    grounded_output: bool
+    correct_shared_surface: bool
+    audible_narration: bool
+    live_qa_or_revision: bool
+    graceful_leave: bool
+    notes: str = Field(default="", max_length=2_000)
+
+
+class RehearsalEvidence(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    created_at: datetime = Field(default_factory=now_utc)
+    runtime_instance_id: UUID
+    meeting_id: UUID
+    task_id: UUID
+    run_number: int
+    consecutive_passes: int
+    participant_name: str
+    notes: str = ""
+    confirmations: dict[str, bool]
+    automated_checks: dict[str, bool]
+    passed: bool
+    commit: str | None = None
+    evidence_path: str | None = None
 
 
 class CalendarEvent(BaseModel):
@@ -270,6 +368,15 @@ class RuntimeMetrics(BaseModel):
     presentation_count: int = 0
     audio_capture_event_count: int = 0
     direct_request_count: int = 0
+    agent_tool_call_count: int = 0
+    recovery_event_count: int = 0
+    realtime_failure_count: int = 0
+    uptime_seconds: float = 0
+    process_cpu_seconds: float = 0
+    peak_rss_mb: float = 0
+    workspace_disk_mb: float = 0
+    resource_budget_ok: bool = True
+    resource_budget_violations: list[str] = Field(default_factory=list)
 
 
 class RuntimeSnapshot(BaseModel):
@@ -283,6 +390,7 @@ class RuntimeSnapshot(BaseModel):
     calendar_auto_join_running: bool = False
     health: list[HealthItem]
     transcript: list[TranscriptSegment]
+    meeting_memory: list[MeetingMemoryItem] = Field(default_factory=list)
     tasks: list[RobinTask]
     artifacts: list[Artifact]
     speech: list[SpeechRecord] = Field(default_factory=list)
@@ -291,6 +399,7 @@ class RuntimeSnapshot(BaseModel):
 
 class JoinMeetingRequest(BaseModel):
     meeting_url: str
+    start_listening: bool = False
 
 
 class TranscriptIngestRequest(BaseModel):
@@ -316,6 +425,12 @@ class AudioListenLoopRequest(BaseModel):
     duration_ms: int | None = None
     interval_ms: int | None = None
     max_iterations: int | None = None
+
+
+class BrowserOperatorRequest(BaseModel):
+    request: str
+    page_name: str = "meet"
+    approval_token: str | None = None
 
 
 class CalendarAutoJoinRequest(BaseModel):

@@ -19,10 +19,14 @@ class RuntimeConfig(BaseModel):
     speech_floor_silence_ms: int = 400
     speech_floor_max_wait_ms: int = 3000
     min_free_disk_mb: int = 512
+    max_peak_rss_mb: int = 1024
+    max_workspace_disk_mb: int = 2048
 
 
 class ModelConfig(BaseModel):
     primary: str = "gpt-5.6"
+    agent_max_iterations: int = 8
+    agent_max_source_chars: int = 24_000
     intent_confidence_accept: float = 0.75
     intent_confidence_confirm: float = 0.60
     intent_timeout_seconds: float = 4.0
@@ -51,6 +55,7 @@ class BrowserConfig(BaseModel):
     share_dialog_retries: int = 1
     share_dialog_poll_interval_ms: int = 250
     computer_use_command: str = "cua-driver"
+    captions_enabled: bool = True
 
 
 class AudioConfig(BaseModel):
@@ -60,10 +65,22 @@ class AudioConfig(BaseModel):
     capture_bundle_id: str = "com.google.Chrome"
     capture_sample_duration_ms: int = 1500
     capture_loop_interval_ms: int = 500
+    silence_rms_threshold: float = 0.002
+    openai_timeout_seconds: float = 20.0
+    openai_max_retries: int = 1
     speech_model: str = "gpt-4o-mini-tts"
     transcription_model: str = "gpt-4o-mini-transcribe"
+    realtime_transcription_enabled: bool = False
+    realtime_transcription_model: str = "gpt-realtime-whisper"
+    realtime_transcription_delay: str = "low"
+    realtime_vad_silence_ms: int = 550
+    realtime_vad_min_speech_ms: int = 180
+    realtime_chunk_bytes: int = 2400
     speech_voice: str = "alloy"
     speech_format: str = "wav"
+    streaming_speech_enabled: bool = True
+    streaming_speech_chunk_bytes: int = 4_800
+    streaming_speech_sample_rate: int = 24_000
     output_device_name: str = "BlackHole 2ch"
     post_speech_cooldown_ms: int = 700
     simulator_transcript: str = (
@@ -77,7 +94,9 @@ class WorkspaceConfig(BaseModel):
     generated_dir: str = "generated"
     sessions_dir: str = "sessions"
     max_file_size_mb: int = 50
-    allowed_extensions: list[str] = Field(default_factory=lambda: [".csv", ".xlsx", ".pdf"])
+    allowed_extensions: list[str] = Field(
+        default_factory=lambda: [".csv", ".xlsx", ".pdf", ".pptx", ".txt", ".md"]
+    )
 
 
 class PresentationConfig(BaseModel):
