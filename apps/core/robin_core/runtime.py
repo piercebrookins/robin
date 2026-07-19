@@ -66,7 +66,11 @@ class RobinRuntime:
         self.browser = BrowserController(self.settings.browser)
         self.task_agent = GeneralTaskAgent(self.settings, self.workspace)
         self.browser_operator = ControlledBrowserAgent(self.settings, self.browser)
-        self.meet = GoogleMeetAdapter(self.browser, self.settings.browser)
+        self.meet = GoogleMeetAdapter(
+            self.browser,
+            self.settings.browser,
+            microphone_device_name=self.settings.audio.output_device_name,
+        )
         self.audio = AudioBridge(
             self.settings.audio,
             self.workspace.sessions / "speech",
@@ -221,6 +225,7 @@ class RobinRuntime:
                     {
                         "meeting_url": meeting_url,
                         "latency_ms": int((time.perf_counter() - started) * 1000),
+                        "microphone_device": self.meet.selected_microphone_device,
                     },
                     component="meeting",
                 )

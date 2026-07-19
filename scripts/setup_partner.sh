@@ -223,7 +223,8 @@ Before real Meet smoke:
 2. Sign into Robin's dedicated Google account in that dedicated Chrome window.
 3. Leave that Chrome window open while running Robin.
 4. Grant Screen Recording and Accessibility to the terminal/app running Robin.
-5. In Google Meet settings, choose BlackHole 2ch as Robin's microphone.
+5. Robin will select BlackHole 2ch and disable Studio sound/Adaptive audio automatically. If it
+   reports a microphone setup failure, open Meet settings and confirm BlackHole 2ch is available.
 6. Confirm CuaDriver.app has Accessibility and Screen Recording permission.
 7. Have a second participant join the same Meet to verify Robin can be heard.
 EOF
