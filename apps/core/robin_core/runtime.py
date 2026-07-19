@@ -109,10 +109,12 @@ class RobinRuntime:
             meeting_state=self.meeting_state,
             meeting_url=self.meeting_url,
             meeting_id=self.meeting_id,
-            listening=self.meeting_state in {MeetingState.LISTENING, MeetingState.SPEAKING, MeetingState.PRESENTING},
+            listening=self.meeting_state
+            in {MeetingState.LISTENING, MeetingState.SPEAKING, MeetingState.PRESENTING},
             presenting=self.meet.presenting,
             capture_loop_running=self._listen_handle is not None and not self._listen_handle.done(),
-            calendar_auto_join_running=self._calendar_handle is not None and not self._calendar_handle.done(),
+            calendar_auto_join_running=self._calendar_handle is not None
+            and not self._calendar_handle.done(),
             health=self.health,
             transcript=self.transcript[-100:],
             meeting_memory=[
@@ -127,11 +129,29 @@ class RobinRuntime:
     def refresh_health(self) -> None:
         bridge_mode = self.settings.audio.bridge_mode
         self.health = [
-            HealthItem(name="workspace", ok=self.workspace.root.exists(), detail=str(self.workspace.root)),
-            HealthItem(name="audio_capture", ok=self.audio.capture_healthy, detail=f"{self.settings.audio.mode}/{bridge_mode} bridge healthy"),
-            HealthItem(name="virtual_microphone", ok=self.audio.virtual_mic_healthy, detail=self.settings.audio.output_device_name),
-            HealthItem(name="browser_automation", ok=True, detail=f"{self.settings.browser.automation_mode} adapter ready"),
-            HealthItem(name="openai", ok=bool(self.settings.openai_api_key), detail="configured" if self.settings.openai_api_key else "local fallback"),
+            HealthItem(
+                name="workspace", ok=self.workspace.root.exists(), detail=str(self.workspace.root)
+            ),
+            HealthItem(
+                name="audio_capture",
+                ok=self.audio.capture_healthy,
+                detail=f"{self.settings.audio.mode}/{bridge_mode} bridge healthy",
+            ),
+            HealthItem(
+                name="virtual_microphone",
+                ok=self.audio.virtual_mic_healthy,
+                detail=self.settings.audio.output_device_name,
+            ),
+            HealthItem(
+                name="browser_automation",
+                ok=True,
+                detail=f"{self.settings.browser.automation_mode} adapter ready",
+            ),
+            HealthItem(
+                name="openai",
+                ok=bool(self.settings.openai_api_key),
+                detail="configured" if self.settings.openai_api_key else "local fallback",
+            ),
         ]
 
     async def refresh_bridge_health(self) -> None:
@@ -256,7 +276,9 @@ class RobinRuntime:
 
     def calendar_snapshot(self) -> CalendarSnapshot:
         snapshot = calendar_snapshot(self.settings.calendar)
-        snapshot.auto_join_running = self._calendar_handle is not None and not self._calendar_handle.done()
+        snapshot.auto_join_running = (
+            self._calendar_handle is not None and not self._calendar_handle.done()
+        )
         return snapshot
 
     async def reindex_workspace(self) -> WorkspaceSnapshot:
@@ -298,21 +320,31 @@ class RobinRuntime:
         return await self._join_calendar_event(event)
 
     async def _join_calendar_event(self, event) -> RuntimeSnapshot:
-        await self.emit_event("calendar.event.selected", event.model_dump(mode="json"), component="calendar")
+        await self.emit_event(
+            "calendar.event.selected", event.model_dump(mode="json"), component="calendar"
+        )
         self._calendar_joined_event_ids.add(event.id)
         self._calendar_active_event_id = event.id
         self._calendar_active_event_end = event.end
         return await self.join_meeting(event.meeting_url)
 
-    async def set_calendar_auto_join(self, enabled: bool, interval_seconds: float = 15.0) -> RuntimeSnapshot:
+    async def set_calendar_auto_join(
+        self, enabled: bool, interval_seconds: float = 15.0
+    ) -> RuntimeSnapshot:
         self.settings.calendar.auto_join = enabled
         if enabled:
             if not self.settings.calendar.enabled:
                 raise ValueError("Calendar discovery is disabled.")
             if self._calendar_handle and not self._calendar_handle.done():
                 return await self.publish()
-            self._calendar_handle = asyncio.create_task(self._calendar_loop(max(interval_seconds, 1.0)))
-            await self.emit_event("calendar.auto_join.enabled", {"interval_seconds": max(interval_seconds, 1.0)}, component="calendar")
+            self._calendar_handle = asyncio.create_task(
+                self._calendar_loop(max(interval_seconds, 1.0))
+            )
+            await self.emit_event(
+                "calendar.auto_join.enabled",
+                {"interval_seconds": max(interval_seconds, 1.0)},
+                component="calendar",
+            )
         else:
             if self._calendar_handle and not self._calendar_handle.done():
                 self._calendar_handle.cancel()
@@ -324,13 +356,25 @@ class RobinRuntime:
 
     async def poll_calendar_once(self, now: datetime | None = None) -> RuntimeSnapshot:
         snapshot = calendar_snapshot(self.settings.calendar, now=now)
-        snapshot.auto_join_running = self._calendar_handle is not None and not self._calendar_handle.done()
+        snapshot.auto_join_running = (
+            self._calendar_handle is not None and not self._calendar_handle.done()
+        )
         if snapshot.error:
-            await self.emit_event("calendar.poll.failed", {"error": snapshot.error}, component="calendar")
+            await self.emit_event(
+                "calendar.poll.failed", {"error": snapshot.error}, component="calendar"
+            )
             return await self.publish()
         current = now or datetime.now(timezone.utc)
-        if self._calendar_active_event_id and self._calendar_active_event_end and self._calendar_active_event_end <= current:
-            await self.emit_event("calendar.event.ended", {"event_id": self._calendar_active_event_id}, component="calendar")
+        if (
+            self._calendar_active_event_id
+            and self._calendar_active_event_end
+            and self._calendar_active_event_end <= current
+        ):
+            await self.emit_event(
+                "calendar.event.ended",
+                {"event_id": self._calendar_active_event_id},
+                component="calendar",
+            )
             self._calendar_active_event_id = None
             self._calendar_active_event_end = None
             if self.meeting_url:
@@ -338,10 +382,18 @@ class RobinRuntime:
         if not self.settings.calendar.auto_join:
             return await self.publish()
         if snapshot.conflicts:
-            await self.emit_event("calendar.auto_join.skipped", {"reason": "conflict", "conflicts": snapshot.conflicts}, component="calendar")
+            await self.emit_event(
+                "calendar.auto_join.skipped",
+                {"reason": "conflict", "conflicts": snapshot.conflicts},
+                component="calendar",
+            )
             return await self.publish()
         if self.meeting_state not in {MeetingState.IDLE, MeetingState.ENDED} and self.meeting_url:
-            await self.emit_event("calendar.auto_join.skipped", {"reason": "already_in_meeting", "meeting_url": self.meeting_url}, component="calendar")
+            await self.emit_event(
+                "calendar.auto_join.skipped",
+                {"reason": "already_in_meeting", "meeting_url": self.meeting_url},
+                component="calendar",
+            )
             return await self.publish()
         join_before = current.timestamp() + self.settings.calendar.join_early_seconds
         candidates = [
@@ -355,7 +407,9 @@ class RobinRuntime:
         if not candidates:
             return await self.publish()
         event = candidates[0]
-        await self.emit_event("calendar.auto_join.started", event.model_dump(mode="json"), component="calendar")
+        await self.emit_event(
+            "calendar.auto_join.started", event.model_dump(mode="json"), component="calendar"
+        )
         return await self._join_calendar_event(event)
 
     async def _calendar_loop(self, interval_seconds: float) -> None:
@@ -366,7 +420,9 @@ class RobinRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await self.emit_event("calendar.auto_join.failed", {"error": str(exc)}, component="calendar")
+            await self.emit_event(
+                "calendar.auto_join.failed", {"error": str(exc)}, component="calendar"
+            )
             await self.publish()
 
     async def leave_meeting(self) -> RuntimeSnapshot:
@@ -389,8 +445,20 @@ class RobinRuntime:
 
     async def emergency_stop(self) -> RuntimeSnapshot:
         self.runtime_state = RuntimeState.STOPPING
-        for handle in self._task_handles.values():
+        cleanup_errors: list[str] = []
+        try:
+            await self.audio.interrupt_speech()
+        except Exception as exc:
+            cleanup_errors.append(f"interrupt_speech: {exc}")
+        await self.stop_listening_loop()
+        task_handles = list(self._task_handles.values())
+        speech_handles = list(self._speech_handles)
+        for handle in [*task_handles, *speech_handles]:
             handle.cancel()
+        if task_handles or speech_handles:
+            await asyncio.gather(*task_handles, *speech_handles, return_exceptions=True)
+        self._task_handles.clear()
+        self._speech_handles.clear()
         for handle in list(self._memory_handles):
             handle.cancel()
         if self._memory_handles:
@@ -402,7 +470,14 @@ class RobinRuntime:
                 await self._calendar_handle
             self._calendar_handle = None
             self.settings.calendar.auto_join = False
-        await self.stop_listening_loop()
+        if self.meet.presenting or any(state.active for state in self.presentations.values()):
+            try:
+                await self.meet.stop_presenting()
+            except Exception as exc:
+                cleanup_errors.append(f"stop_presenting: {exc}")
+        for state in self.presentations.values():
+            state.active = False
+            state.updated_at = now_utc()
         for task in self.tasks:
             if task.status not in {TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED}:
                 task.status = TaskStatus.CANCELLED
@@ -410,12 +485,24 @@ class RobinRuntime:
                 task.outcome_detail = "Cancelled by emergency stop."
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
-        await self.audio.stop()
-        await self.meet.leave()
+        try:
+            await self.audio.stop()
+        except Exception as exc:
+            cleanup_errors.append(f"audio_stop: {exc}")
+        try:
+            await self.meet.leave()
+        except Exception as exc:
+            cleanup_errors.append(f"meeting_leave: {exc}")
+        self.meet.presenting = False
+        self.meet.muted = True
         self.meeting_state = MeetingState.ENDED
         self.runtime_state = RuntimeState.READY
         self.refresh_health()
-        await self.emit_event("runtime.emergency_stop", {}, component="runtime")
+        await self.emit_event(
+            "runtime.emergency_stop",
+            {"cleanup_errors": cleanup_errors},
+            component="runtime",
+        )
         return await self.publish()
 
     async def ingest_transcript(
@@ -481,7 +568,9 @@ class RobinRuntime:
             )
             await self.publish()
 
-    async def transcribe_audio_file(self, relative_path: str, speaker_name: str | None = None) -> RuntimeSnapshot:
+    async def transcribe_audio_file(
+        self, relative_path: str, speaker_name: str | None = None
+    ) -> RuntimeSnapshot:
         path = self.workspace.resolve(relative_path)
         if not path.is_file():
             raise FileNotFoundError(f"Audio file not found: {relative_path}")
@@ -588,8 +677,12 @@ class RobinRuntime:
         signal = rms >= self.settings.audio.silence_rms_threshold
         transcript = ""
         if signal:
-            transcript = (await self.audio.transcribe_file(self.workspace.resolve(result["path"]))).strip()
-        event_type = "audio.input.test.passed" if signal and transcript else "audio.input.test.quiet"
+            transcript = (
+                await self.audio.transcribe_file(self.workspace.resolve(result["path"]))
+            ).strip()
+        event_type = (
+            "audio.input.test.passed" if signal and transcript else "audio.input.test.quiet"
+        )
         payload = {
             "rms": rms,
             "peak": peak,
@@ -639,10 +732,14 @@ class RobinRuntime:
         normalized = " ".join(text.lower().split())
         now_ms = int(time.time() * 1000)
         if not normalized:
-            await self.emit_event("audio.transcript.empty", {"path": result["path"]}, component="audio")
+            await self.emit_event(
+                "audio.transcript.empty", {"path": result["path"]}, component="audio"
+            )
             return await self.publish()
         if normalized == self._last_audio_text and now_ms - self._last_audio_text_at_ms < 10_000:
-            await self.emit_event("audio.transcript.duplicate_suppressed", {"text": text}, component="audio")
+            await self.emit_event(
+                "audio.transcript.duplicate_suppressed", {"text": text}, component="audio"
+            )
             return await self.publish()
         self._last_audio_text = normalized
         self._last_audio_text_at_ms = now_ms
@@ -668,12 +765,15 @@ class RobinRuntime:
                 bundle_id=bundle_id or self.settings.audio.capture_bundle_id,
                 max_iterations=max_iterations,
             )
-            if self.settings.audio.realtime_transcription_enabled
-            and self.settings.openai_api_key
+            if self.settings.audio.realtime_transcription_enabled and self.settings.openai_api_key
             else self._listening_loop(
                 bundle_id=bundle_id or self.settings.audio.capture_bundle_id,
-                duration_ms=duration_ms if duration_ms is not None else self.settings.audio.capture_sample_duration_ms,
-                interval_ms=interval_ms if interval_ms is not None else self.settings.audio.capture_loop_interval_ms,
+                duration_ms=duration_ms
+                if duration_ms is not None
+                else self.settings.audio.capture_sample_duration_ms,
+                interval_ms=interval_ms
+                if interval_ms is not None
+                else self.settings.audio.capture_loop_interval_ms,
                 max_iterations=max_iterations,
             )
         )
@@ -732,7 +832,9 @@ class RobinRuntime:
         await self.publish()
         return result
 
-    async def _listening_loop(self, bundle_id: str, duration_ms: int, interval_ms: int, max_iterations: int | None) -> None:
+    async def _listening_loop(
+        self, bundle_id: str, duration_ms: int, interval_ms: int, max_iterations: int | None
+    ) -> None:
         iterations = 0
         consecutive_failures = 0
         try:
@@ -950,7 +1052,12 @@ class RobinRuntime:
         )
         self.tasks.append(task)
         self.store.upsert("task", task)
-        await self.emit_event("task.created", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+        await self.emit_event(
+            "task.created",
+            task.model_dump(mode="json"),
+            task_id=task.id,
+            component="task_orchestrator",
+        )
         self._schedule_task(task)
         await self.publish()
         self._schedule_acknowledgement(f"Got it. I’ll work on {task.title}.")
@@ -966,13 +1073,24 @@ class RobinRuntime:
         if handle:
             handle.cancel()
         self.store.upsert("task", task)
-        await self.emit_event("task.cancelled", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+        await self.emit_event(
+            "task.cancelled",
+            task.model_dump(mode="json"),
+            task_id=task.id,
+            component="task_orchestrator",
+        )
         await self._acknowledge(f"Cancelled {task.title}.")
         await self.publish()
 
     async def retry_task(self, task_id: UUID) -> RuntimeSnapshot:
         task = self._find_task(task_id)
-        active_statuses = {TaskStatus.ACCEPTED, TaskStatus.QUEUED, TaskStatus.EXECUTING, TaskStatus.VALIDATING, TaskStatus.PRESENTING}
+        active_statuses = {
+            TaskStatus.ACCEPTED,
+            TaskStatus.QUEUED,
+            TaskStatus.EXECUTING,
+            TaskStatus.VALIDATING,
+            TaskStatus.PRESENTING,
+        }
         if task.status in active_statuses:
             raise ValueError(f"Task is already active: {task.status}")
         task.revision += 1
@@ -984,7 +1102,12 @@ class RobinRuntime:
         task.completed_at = None
         task.updated_at = now_utc()
         self.store.upsert("task", task)
-        await self.emit_event("task.retry", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+        await self.emit_event(
+            "task.retry",
+            task.model_dump(mode="json"),
+            task_id=task.id,
+            component="task_orchestrator",
+        )
         await self._acknowledge(f"Retrying {task.title}.")
         self._schedule_task(task)
         return await self.publish()
@@ -1033,7 +1156,12 @@ class RobinRuntime:
         task.completed_at = now_utc()
         task.updated_at = now_utc()
         self.store.upsert("task", task)
-        await self.emit_event("presentation.completed", task.model_dump(mode="json"), task_id=task.id, component="presentation")
+        await self.emit_event(
+            "presentation.completed",
+            task.model_dump(mode="json"),
+            task_id=task.id,
+            component="presentation",
+        )
         return await self.publish()
 
     async def stop_presenting(self, task_id: UUID | None = None) -> RuntimeSnapshot:
@@ -1089,7 +1217,9 @@ class RobinRuntime:
         self.presentations[task_id] = state
         return state
 
-    async def navigate_presentation(self, task_id: UUID, action: str, index: int | None = None) -> PresentationSession:
+    async def navigate_presentation(
+        self, task_id: UUID, action: str, index: int | None = None
+    ) -> PresentationSession:
         state = self.presentation_state(task_id)
         if action == "next":
             state.active_slide += 1
@@ -1103,7 +1233,12 @@ class RobinRuntime:
             raise ValueError(f"Unknown presentation navigation action: {action}")
         state.active_slide = max(0, min(state.active_slide, max(state.slide_count - 1, 0)))
         state.updated_at = now_utc()
-        await self.emit_event("presentation.updated", state.model_dump(mode="json"), task_id=task_id, component="presentation")
+        await self.emit_event(
+            "presentation.updated",
+            state.model_dump(mode="json"),
+            task_id=task_id,
+            component="presentation",
+        )
         await self.publish()
         return state
 
@@ -1149,7 +1284,11 @@ class RobinRuntime:
         if slide.type == "key_metrics":
             metrics = list(slide.metrics.items())[:3]
             if metrics:
-                return "Key metrics: " + "; ".join(f"{label} is {value}" for label, value in metrics) + "."
+                return (
+                    "Key metrics: "
+                    + "; ".join(f"{label} is {value}" for label, value in metrics)
+                    + "."
+                )
             return f"Here are the key metrics for {deck.title}."
         if slide.type == "sources":
             source_names = ", ".join(source.label for source in deck.sources[:3])
@@ -1174,8 +1313,13 @@ class RobinRuntime:
             return
         active = self._active_tasks()
         intent = await self.intent.classify(segment.text, active)
-        if intent.classification in {"direct_request", "confirmed_task"} and intent.confidence >= self.settings.model.intent_confidence_accept:
-            await self.emit_event("intent.detected", intent.model_dump(mode="json"), component="conversation")
+        if (
+            intent.classification in {"direct_request", "confirmed_task"}
+            and intent.confidence >= self.settings.model.intent_confidence_accept
+        ):
+            await self.emit_event(
+                "intent.detected", intent.model_dump(mode="json"), component="conversation"
+            )
             task = RobinTask(
                 meeting_id=self.meeting_id,
                 title=intent.task_title or segment.text[:80],
@@ -1188,7 +1332,12 @@ class RobinRuntime:
             )
             self.tasks.append(task)
             self.store.upsert("task", task)
-            await self.emit_event("task.created", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+            await self.emit_event(
+                "task.created",
+                task.model_dump(mode="json"),
+                task_id=task.id,
+                component="task_orchestrator",
+            )
             self._schedule_task(task)
             await self.publish()
             self._schedule_acknowledgement(
@@ -1199,11 +1348,18 @@ class RobinRuntime:
             task.revision += 1
             task.constraints = sorted(set(task.constraints + intent.constraints + [segment.text]))
             task.outcome_state = TaskOutcomeState.UNVERIFIED
-            task.outcome_detail = "Revision requested; prior verification no longer covers the updated task."
+            task.outcome_detail = (
+                "Revision requested; prior verification no longer covers the updated task."
+            )
             task.source_context_segment_ids.append(segment.id)
             task.updated_at = now_utc()
             self.store.upsert("task", task)
-            await self.emit_event("task.updated", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+            await self.emit_event(
+                "task.updated",
+                task.model_dump(mode="json"),
+                task_id=task.id,
+                component="task_orchestrator",
+            )
             await self._acknowledge("Understood. I’ll apply that update to the active task.")
             handle = self._task_handles.get(task.id)
             if handle and not handle.done():
@@ -1227,6 +1383,7 @@ class RobinRuntime:
                     self._active_tasks(),
                     self._meeting_context(),
                     self._memory_context(),
+                    self._conversation_artifact_context(),
                 )
             )
         elif intent.should_ask_confirmation and intent.clarification_question:
@@ -1251,15 +1408,35 @@ class RobinRuntime:
                 task_id=task.id,
                 component="conversation",
             )
-            await self.emit_event("task.created", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
-            await self.emit_event("task.awaiting_clarification", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+            await self.emit_event(
+                "task.created",
+                task.model_dump(mode="json"),
+                task_id=task.id,
+                component="task_orchestrator",
+            )
+            await self.emit_event(
+                "task.awaiting_clarification",
+                task.model_dump(mode="json"),
+                task_id=task.id,
+                component="task_orchestrator",
+            )
             await self._acknowledge(intent.clarification_question)
 
     async def _handle_pending_confirmation(self, segment: TranscriptSegment) -> bool:
         if not self._pending_confirmation:
             return False
         lowered = segment.text.strip().lower()
-        accepts = {"yes", "yeah", "yep", "please do", "go ahead", "do it", "take it", "sounds good", "correct"}
+        accepts = {
+            "yes",
+            "yeah",
+            "yep",
+            "please do",
+            "go ahead",
+            "do it",
+            "take it",
+            "sounds good",
+            "correct",
+        }
         declines = {"no", "nope", "never mind", "cancel", "don't", "do not", "ignore that"}
         is_accept = any(phrase in lowered for phrase in accepts)
         is_decline = any(phrase in lowered for phrase in declines)
@@ -1281,7 +1458,12 @@ class RobinRuntime:
                 task_id=task.id,
                 component="conversation",
             )
-            await self.emit_event("task.cancelled", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+            await self.emit_event(
+                "task.cancelled",
+                task.model_dump(mode="json"),
+                task_id=task.id,
+                component="task_orchestrator",
+            )
             await self._acknowledge("Okay, I will leave that alone.")
             await self.publish()
             return True
@@ -1293,10 +1475,19 @@ class RobinRuntime:
             task.updated_at = now_utc()
             task.source_context_segment_ids.append(segment.id)
             self.store.upsert("task", task)
-            await self.emit_event("task.cancelled", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+            await self.emit_event(
+                "task.cancelled",
+                task.model_dump(mode="json"),
+                task_id=task.id,
+                component="task_orchestrator",
+            )
             await self.emit_event(
                 "clarification.accepted",
-                {"original_text": original.text, "answer": segment.text, "duplicate_task_id": str(duplicate.id)},
+                {
+                    "original_text": original.text,
+                    "answer": segment.text,
+                    "duplicate_task_id": str(duplicate.id),
+                },
                 task_id=duplicate.id,
                 component="conversation",
             )
@@ -1315,7 +1506,12 @@ class RobinRuntime:
             task_id=task.id,
             component="conversation",
         )
-        await self.emit_event("task.accepted", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+        await self.emit_event(
+            "task.accepted",
+            task.model_dump(mode="json"),
+            task_id=task.id,
+            component="task_orchestrator",
+        )
         await self._acknowledge("Got it. I’ll take that on.")
         self._schedule_task(task)
         await self.publish()
@@ -1348,7 +1544,10 @@ class RobinRuntime:
             TaskStatus.PRESENTING,
         }
         for task in sorted(self.tasks, key=lambda item: item.updated_at, reverse=True):
-            if task.status in duplicate_statuses and self._normalize_task_text(task.request_text) == normalized:
+            if (
+                task.status in duplicate_statuses
+                and self._normalize_task_text(task.request_text) == normalized
+            ):
                 return task
         return None
 
@@ -1381,29 +1580,38 @@ class RobinRuntime:
                 task.outcome_detail = "Waiting for an available bounded task slot."
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
-                await self.emit_event("task.queued", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+                await self.emit_event(
+                    "task.queued",
+                    task.model_dump(mode="json"),
+                    task_id=task.id,
+                    component="task_orchestrator",
+                )
                 await self.publish()
             async with self.task_slots:
                 violations = self._resource_budget_violations()
                 if violations:
-                    raise RuntimeError(
-                        "Robin resource budget exceeded: " + "; ".join(violations)
-                    )
+                    raise RuntimeError("Robin resource budget exceeded: " + "; ".join(violations))
                 task.status = TaskStatus.EXECUTING
                 task.outcome_state = TaskOutcomeState.WORKING
-                task.outcome_detail = "The general agent is inspecting sources and producing the requested output."
+                task.outcome_detail = (
+                    "The general agent is inspecting sources and producing the requested output."
+                )
                 task.started_at = task.started_at or now_utc()
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
-                await self.emit_event("task.started", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+                await self.emit_event(
+                    "task.started",
+                    task.model_dump(mode="json"),
+                    task_id=task.id,
+                    component="task_orchestrator",
+                )
                 await self.publish()
                 records = self.workspace.index()
                 self.files = records
                 self.store.replace_all("file", records)
                 if self.task_agent.client:
-                    async def report_agent_progress(
-                        event_type: str, payload: dict
-                    ) -> None:
+
+                    async def report_agent_progress(event_type: str, payload: dict) -> None:
                         await self.emit_event(
                             event_type,
                             payload,
@@ -1440,15 +1648,27 @@ class RobinRuntime:
                     )
                 task.status = TaskStatus.VALIDATING
                 task.outcome_state = TaskOutcomeState.WORKING
-                task.outcome_detail = "Checking citations, structure, calculations, and artifact readiness."
+                task.outcome_detail = (
+                    "Checking citations, structure, calculations, and artifact readiness."
+                )
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
-                await self.emit_event("task.validating", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+                await self.emit_event(
+                    "task.validating",
+                    task.model_dump(mode="json"),
+                    task_id=task.id,
+                    component="task_orchestrator",
+                )
                 await self.publish()
                 for artifact in artifacts:
                     self.artifacts.append(artifact)
                     self.store.upsert("artifact", artifact)
-                    await self.emit_event("artifact.created", artifact.model_dump(mode="json"), task_id=task.id, component="artifact_worker")
+                    await self.emit_event(
+                        "artifact.created",
+                        artifact.model_dump(mode="json"),
+                        task_id=task.id,
+                        component="artifact_worker",
+                    )
                 if not validation.ok:
                     failed_checks = [check.name for check in validation.checks if not check.ok]
                     task.status = TaskStatus.FAILED
@@ -1457,8 +1677,15 @@ class RobinRuntime:
                     task.outcome_detail = task.error
                     task.updated_at = now_utc()
                     self.store.upsert("task", task)
-                    await self.emit_event("task.failed", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
-                    await self._acknowledge("I found a validation issue in the analysis, so I will not present it yet.")
+                    await self.emit_event(
+                        "task.failed",
+                        task.model_dump(mode="json"),
+                        task_id=task.id,
+                        component="task_orchestrator",
+                    )
+                    await self._acknowledge(
+                        "I found a validation issue in the analysis, so I will not present it yet."
+                    )
                     await self.publish()
                     return
                 task.status = TaskStatus.READY_TO_PRESENT
@@ -1466,7 +1693,12 @@ class RobinRuntime:
                 task.outcome_detail = "Grounding, citations, and artifact validation passed."
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
-                await self.emit_event("task.completed", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+                await self.emit_event(
+                    "task.completed",
+                    task.model_dump(mode="json"),
+                    task_id=task.id,
+                    component="task_orchestrator",
+                )
                 await self.publish()
                 await self._safe_acknowledge("The analysis and slides are ready.")
         except asyncio.CancelledError:
@@ -1475,7 +1707,12 @@ class RobinRuntime:
             task.outcome_detail = "Execution was cancelled before verification."
             task.updated_at = now_utc()
             self.store.upsert("task", task)
-            await self.emit_event("task.cancelled", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+            await self.emit_event(
+                "task.cancelled",
+                task.model_dump(mode="json"),
+                task_id=task.id,
+                component="task_orchestrator",
+            )
             await self.publish()
         except Exception as exc:
             task.status = TaskStatus.FAILED
@@ -1488,7 +1725,12 @@ class RobinRuntime:
                 task.outcome_detail = str(exc)
             task.updated_at = now_utc()
             self.store.upsert("task", task)
-            await self.emit_event("task.failed", task.model_dump(mode="json"), task_id=task.id, component="task_orchestrator")
+            await self.emit_event(
+                "task.failed",
+                task.model_dump(mode="json"),
+                task_id=task.id,
+                component="task_orchestrator",
+            )
             await self.publish()
             await self._safe_acknowledge(self._task_failure_acknowledgement(task))
 
@@ -1518,6 +1760,45 @@ class RobinRuntime:
     def _memory_context(self, meeting_id: UUID | None = None) -> list[MeetingMemoryItem]:
         target = meeting_id or self.meeting_id
         return [item for item in self.meeting_memory if item.meeting_id == target][-60:]
+
+    def _conversation_artifact_context(self) -> list[dict]:
+        contexts: list[dict] = []
+        tasks = sorted(self.tasks, key=lambda task: task.updated_at, reverse=True)
+        for task in tasks:
+            deck_artifact = self._latest_artifact(task.id, "deck_json")
+            if deck_artifact is None:
+                continue
+            try:
+                deck = DeckSpec.model_validate_json(
+                    self.workspace.resolve(deck_artifact.path).read_text(encoding="utf-8")
+                )
+            except Exception:
+                continue
+            contexts.append(
+                {
+                    "task_id": str(task.id),
+                    "title": task.title[:160],
+                    "revision": task.revision,
+                    "outcome_state": task.outcome_state,
+                    "outcome_detail": (task.outcome_detail or "")[:300],
+                    "slides": [
+                        {
+                            "title": slide.title[:160],
+                            "body": [item[:400] for item in slide.body[:2]],
+                            "metrics": dict(list(slide.metrics.items())[:6]),
+                        }
+                        for slide in deck.slides[:8]
+                        if slide.type != "sources"
+                    ],
+                    "sources": [
+                        {"label": source.label[:160], "path": source.path[:300]}
+                        for source in deck.sources[:12]
+                    ],
+                }
+            )
+            if len(contexts) >= 3:
+                break
+        return contexts
 
     def _schedule_acknowledgement(self, text: str) -> None:
         handle = asyncio.create_task(self._safe_acknowledge(text))
@@ -1612,7 +1893,9 @@ class RobinRuntime:
         active = self._active_tasks()
         if not active:
             return "I do not have an active task right now."
-        return "; ".join(f"{task.title}: {task.status.value.lower().replace('_', ' ')}" for task in active[:2])
+        return "; ".join(
+            f"{task.title}: {task.status.value.lower().replace('_', ' ')}" for task in active[:2]
+        )
 
     def _find_task(self, task_id: UUID) -> RobinTask:
         for task in self.tasks:
@@ -1622,7 +1905,12 @@ class RobinRuntime:
 
     def _active_tasks(self) -> list[RobinTask]:
         return sorted(
-            (task for task in self.tasks if task.status not in {TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED}),
+            (
+                task
+                for task in self.tasks
+                if task.status
+                not in {TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED}
+            ),
             key=lambda task: task.updated_at,
             reverse=True,
         )
@@ -1631,7 +1919,11 @@ class RobinRuntime:
         return self.workspace.resolve(relative_path)
 
     def _latest_artifact(self, task_id: UUID, artifact_type: str) -> Artifact | None:
-        artifacts = [artifact for artifact in self.artifacts if artifact.task_id == task_id and artifact.type == artifact_type]
+        artifacts = [
+            artifact
+            for artifact in self.artifacts
+            if artifact.task_id == task_id and artifact.type == artifact_type
+        ]
         if not artifacts:
             return None
         return max(artifacts, key=lambda artifact: (artifact.revision, artifact.created_at))
@@ -1687,9 +1979,7 @@ class RobinRuntime:
         usage = resource.getrusage(resource.RUSAGE_SELF)
         rss_bytes = usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
         workspace_bytes = sum(
-            path.stat().st_size
-            for path in self.workspace.root.rglob("*")
-            if path.is_file()
+            path.stat().st_size for path in self.workspace.root.rglob("*") if path.is_file()
         )
         active_statuses = {
             TaskStatus.AWAITING_CLARIFICATION,
@@ -1708,20 +1998,22 @@ class RobinRuntime:
             event_count=len(events),
             transcript_count=len(self.transcript),
             task_count=len(self.tasks),
-            completed_task_count=sum(1 for task in self.tasks if task.status == TaskStatus.COMPLETED),
+            completed_task_count=sum(
+                1 for task in self.tasks if task.status == TaskStatus.COMPLETED
+            ),
             failed_task_count=sum(1 for task in self.tasks if task.status == TaskStatus.FAILED),
             active_task_count=sum(1 for task in self.tasks if task.status in active_statuses),
             artifact_count=len(self.artifacts),
             speech_count=len(self.speech),
             presentation_count=len(self.presentations),
-            audio_capture_event_count=sum(1 for event in events if event.type.startswith("audio.capture")),
+            audio_capture_event_count=sum(
+                1 for event in events if event.type.startswith("audio.capture")
+            ),
             direct_request_count=sum(1 for event in events if event.type == "task.created"),
             agent_tool_call_count=sum(
                 1 for event in events if event.type == "agent.tool.completed"
             ),
-            recovery_event_count=sum(
-                1 for event in events if ".recovery." in event.type
-            ),
+            recovery_event_count=sum(1 for event in events if ".recovery." in event.type),
             realtime_failure_count=sum(
                 1 for event in events if event.type == "audio.realtime.failed"
             ),
@@ -1740,16 +2032,16 @@ class RobinRuntime:
     ) -> list[str]:
         if peak_rss_mb is None:
             usage = resource.getrusage(resource.RUSAGE_SELF)
-            rss_bytes = (
-                usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
-            )
+            rss_bytes = usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
             peak_rss_mb = rss_bytes / 1024 / 1024
         if workspace_disk_mb is None:
-            workspace_disk_mb = sum(
-                path.stat().st_size
-                for path in self.workspace.root.rglob("*")
-                if path.is_file()
-            ) / 1024 / 1024
+            workspace_disk_mb = (
+                sum(
+                    path.stat().st_size for path in self.workspace.root.rglob("*") if path.is_file()
+                )
+                / 1024
+                / 1024
+            )
         violations: list[str] = []
         if peak_rss_mb > self.settings.runtime.max_peak_rss_mb:
             violations.append(

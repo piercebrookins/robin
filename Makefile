@@ -1,4 +1,4 @@
-.PHONY: robin setup launch-chrome seed seed-demo dev doctor preflight core web test eval-operator eval-operator-live smoke smoke-test smoke-audio smoke-audio-live smoke-audio-realtime smoke-browser-operator smoke-memory smoke-agent smoke-bridge smoke-capture smoke-listen smoke-leave-cleanup smoke-meet-fixture smoke-meet-recovery smoke-share-dialog-fixture smoke-calendar smoke-observability smoke-workspace smoke-retry-present smoke-validation smoke-clarification smoke-queue smoke-dedup smoke-real-meet demo-reset typecheck
+.PHONY: robin setup launch-chrome seed seed-demo dev doctor preflight core web test eval-operator eval-operator-live smoke smoke-test smoke-audio smoke-audio-live smoke-audio-realtime smoke-browser-operator smoke-memory smoke-agent smoke-bridge smoke-capture smoke-listen smoke-leave-cleanup smoke-meet-fixture smoke-meet-recovery smoke-share-dialog-fixture smoke-calendar smoke-observability smoke-workspace smoke-retry-present smoke-conversation-revision smoke-resource-budgets smoke-validation smoke-clarification smoke-queue smoke-dedup smoke-real-meet demo-reset typecheck
 
 robin:
 	scripts/run_robin.sh
@@ -94,6 +94,12 @@ smoke-workspace:
 
 smoke-retry-present:
 	uv run python scripts/smoke_retry_present.py
+
+smoke-conversation-revision:
+	uv run python scripts/smoke_conversation_revision.py
+
+smoke-resource-budgets:
+	uv run python scripts/smoke_resource_budgets.py
 
 smoke-validation:
 	uv run python scripts/smoke_validation.py

@@ -165,7 +165,12 @@ physical microphone is not Chrome output and is therefore not a valid hearing te
 - Enforced peak-memory and workspace-disk budgets, displayed live in the dashboard.
 - Persisted task outcome states for working, awaiting confirmation, blocked, failed, verified, and
   cancelled work, with explanatory details visible in the dashboard.
-- Bounded admission waits and one-shot CDP reconnection with cleanup, screenshots, and recovery traces.
+- Grounded post-task Q&A receives bounded validated slide, metric, outcome, and citation context;
+  spoken revisions preserve earlier artifacts and invalidate prior verification until rechecked.
+- Emergency stop interrupts playback, cancels and awaits task/speech/memory workers, stops capture
+  and sharing, deactivates presentation sessions, leaves Meet, and records cleanup errors.
+- Bounded admission waits, closed-target reopening, and one-shot CDP reconnection with cleanup,
+  screenshots, and recovery traces.
 - Meeting leave cleanup that stops the listening loop and presentation state before returning Robin to ready.
 
 ## Operator Evidence and Limitations
@@ -178,6 +183,9 @@ Robin distinguishes automated evidence from real-meeting proof:
   complementary live API model and realtime-audio checks without repeating the deterministic set.
 - `make smoke-agent`, `make smoke-browser-operator`, and `make smoke-memory` exercise live model
   tool use, semantic browser inspection, and sourced memory correction.
+- `make smoke-conversation-revision` proves grounded source Q&A, spoken revision, preserved
+  revisions, latest-revision narration, and cleanup as one outcome-based flow.
+- `make smoke-resource-budgets` compares measured RSS and workspace size with configured limits.
 - `make smoke-audio-live` proves BlackHole output and Chrome capture/transcription locally.
 - `make smoke-real-meet` exercises the full Meet path, but a successful local process alone is not
   proof that another participant heard narration or saw the shared surface.

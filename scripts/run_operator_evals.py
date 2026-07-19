@@ -29,10 +29,17 @@ DETERMINISTIC = [
     ("meet_fixture", ["uv", "run", "python", "scripts/smoke_meet_fixture.py"]),
     ("meet_recovery", ["uv", "run", "python", "scripts/smoke_meet_recovery.py"]),
     ("leave_cleanup", ["uv", "run", "python", "scripts/smoke_leave_cleanup.py"]),
+    (
+        "conversation_revision_q_and_a",
+        ["uv", "run", "python", "scripts/smoke_conversation_revision.py"],
+    ),
+    ("retry_and_narration", ["uv", "run", "python", "scripts/smoke_retry_present.py"]),
     ("clarification", ["uv", "run", "python", "scripts/smoke_clarification.py"]),
     ("queue_and_cancellation", ["uv", "run", "python", "scripts/smoke_queue.py"]),
     ("deduplication", ["uv", "run", "python", "scripts/smoke_dedup.py"]),
     ("artifact_validation", ["uv", "run", "python", "scripts/smoke_validation.py"]),
+    ("observability", ["uv", "run", "python", "scripts/smoke_observability.py"]),
+    ("resource_budgets", ["uv", "run", "python", "scripts/smoke_resource_budgets.py"]),
 ]
 
 LIVE_MODELS = [
@@ -43,6 +50,7 @@ LIVE_MODELS = [
     ("browser_operator", ["uv", "run", "python", "scripts/smoke_browser_operator.py"]),
     ("meeting_memory", ["uv", "run", "python", "scripts/smoke_meeting_memory.py"]),
     ("realtime_audio", ["uv", "run", "python", "scripts/smoke_realtime_audio.py"]),
+    ("audio_workflow", ["uv", "run", "python", "scripts/smoke_audio_workflow.py"]),
 ]
 
 
@@ -67,7 +75,9 @@ def run(name: str, command: list[str]) -> EvalResult:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run Robin's outcome-based operator evaluation matrix.")
+    parser = argparse.ArgumentParser(
+        description="Run Robin's outcome-based operator evaluation matrix."
+    )
     parser.add_argument(
         "--live-models",
         action="store_true",
@@ -79,8 +89,8 @@ def main() -> None:
         help="Run only API-backed agent, browser, memory, and realtime-audio evaluations.",
     )
     args = parser.parse_args()
-    commands = LIVE_MODELS if args.live_only else DETERMINISTIC + (
-        LIVE_MODELS if args.live_models else []
+    commands = (
+        LIVE_MODELS if args.live_only else DETERMINISTIC + (LIVE_MODELS if args.live_models else [])
     )
     results: list[EvalResult] = []
     for index, (name, command) in enumerate(commands, start=1):

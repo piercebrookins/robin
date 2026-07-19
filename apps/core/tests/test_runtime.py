@@ -19,11 +19,66 @@ from robin_core.config import (
 from robin_core.runtime import RobinRuntime
 from robin_core.schemas import (
     MeetingState,
+    PresentationSession,
+    RobinTask,
     RuntimeState,
     TaskOutcomeState,
     TaskStatus,
     ValidationReport,
 )
+
+
+@pytest.mark.asyncio
+async def test_emergency_stop_halts_all_work_speech_capture_and_presentation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+        )
+    )
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    await runtime.start_listening_loop(interval_ms=10_000)
+    task = RobinTask(
+        meeting_id=runtime.meeting_id,
+        title="Long-running task",
+        status=TaskStatus.EXECUTING,
+        request_text="Keep working",
+        requested_outcome="A result",
+    )
+    runtime.tasks.append(task)
+    work_handle = asyncio.create_task(asyncio.Event().wait())
+    speech_handle = asyncio.create_task(asyncio.Event().wait())
+    runtime._task_handles[task.id] = work_handle
+    runtime._speech_handles.add(speech_handle)
+    runtime.presentations[task.id] = PresentationSession(
+        task_id=task.id,
+        active=True,
+        slide_count=3,
+    )
+    runtime.meet.presenting = True
+    runtime.meeting_state = MeetingState.PRESENTING
+
+    snapshot = await runtime.emergency_stop()
+
+    assert snapshot.runtime_state == RuntimeState.READY
+    assert snapshot.meeting_state == MeetingState.ENDED
+    assert snapshot.capture_loop_running is False
+    assert snapshot.presenting is False
+    assert work_handle.cancelled()
+    assert speech_handle.cancelled()
+    assert runtime._task_handles == {}
+    assert runtime._speech_handles == set()
+    assert runtime.presentations[task.id].active is False
+    assert task.status == TaskStatus.CANCELLED
+    assert task.outcome_state == TaskOutcomeState.CANCELLED
+    event = next(
+        item for item in reversed(runtime.recent_events()) if item.type == "runtime.emergency_stop"
+    )
+    assert event.payload["cleanup_errors"] == []
 
 
 @pytest.mark.asyncio
@@ -42,7 +97,10 @@ async def test_demo_task_generates_deck(tmp_path: Path) -> None:
         "2024,Q4,actual,180,110,70\n"
         "2024,Q4,forecast,200,120,80\n"
     )
-    _write_pdf(source / "finance_context.pdf", "Finance context report: 2024 growth improved through Q4 and actuals are preferred for board reporting.")
+    _write_pdf(
+        source / "finance_context.pdf",
+        "Finance context report: 2024 growth improved through Q4 and actuals are preferred for board reporting.",
+    )
     settings = Settings(
         workspace=WorkspaceConfig(root=workspace),
         database=DatabaseConfig(path=workspace / "robin.db"),
@@ -50,7 +108,10 @@ async def test_demo_task_generates_deck(tmp_path: Path) -> None:
     )
     runtime = RobinRuntime(settings)
     await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
-    await runtime.ingest_transcript("Robin, use the finance files to compare our 2024 quarterly results and make a few slides.", "Avery")
+    await runtime.ingest_transcript(
+        "Robin, use the finance files to compare our 2024 quarterly results and make a few slides.",
+        "Avery",
+    )
     task = runtime.tasks[-1]
     handle = runtime._task_handles[task.id]
     await handle
@@ -58,18 +119,37 @@ async def test_demo_task_generates_deck(tmp_path: Path) -> None:
     assert task.outcome_state == TaskOutcomeState.VERIFIED
     assert "validation passed" in (task.outcome_detail or "").casefold()
     assert any(artifact.type == "deck_json" for artifact in runtime.artifacts)
-    deck_artifact = next(artifact for artifact in runtime.artifacts if artifact.task_id == task.id and artifact.type == "deck_json")
-    pptx_artifact = next(artifact for artifact in runtime.artifacts if artifact.task_id == task.id and artifact.type == "deck_pptx")
+    deck_artifact = next(
+        artifact
+        for artifact in runtime.artifacts
+        if artifact.task_id == task.id and artifact.type == "deck_json"
+    )
+    pptx_artifact = next(
+        artifact
+        for artifact in runtime.artifacts
+        if artifact.task_id == task.id and artifact.type == "deck_pptx"
+    )
     deck_json = runtime.artifact_path(deck_artifact.path).read_text()
     assert "finance_context.pdf" in deck_json
     assert "2024 growth improved through Q4" in deck_json
     assert pptx_artifact.path.endswith("deck_v1.pptx")
     with zipfile.ZipFile(runtime.artifact_path(pptx_artifact.path)) as archive:
         assert "ppt/presentation.xml" in archive.namelist()
-    validation = next(artifact for artifact in runtime.artifacts if artifact.task_id == task.id and artifact.type == "validation_json")
-    report = ValidationReport.model_validate_json(runtime.artifact_path(validation.path).read_text())
+    validation = next(
+        artifact
+        for artifact in runtime.artifacts
+        if artifact.task_id == task.id and artifact.type == "validation_json"
+    )
+    report = ValidationReport.model_validate_json(
+        runtime.artifact_path(validation.path).read_text()
+    )
     assert report.ok is True
-    assert {check.name for check in report.checks} >= {"operating_margin_formula", "chart_revenue_series", "lineage_present", "source_citations_present"}
+    assert {check.name for check in report.checks} >= {
+        "operating_margin_formula",
+        "chart_revenue_series",
+        "lineage_present",
+        "source_citations_present",
+    }
     assert "source-data/finance_context.pdf" in report.source_paths
     metrics = runtime.metrics()
     assert metrics.task_count >= 1
@@ -102,8 +182,7 @@ async def test_duplicate_join_is_idempotent_and_can_enable_listening(tmp_path: P
     assert second.capture_loop_running is True
     assert sum(1 for event in runtime.recent_events() if event.type == "meeting.join.started") == 1
     assert any(
-        event.type == "meeting.join.duplicate_suppressed"
-        for event in runtime.recent_events()
+        event.type == "meeting.join.duplicate_suppressed" for event in runtime.recent_events()
     )
     await runtime.stop_listening_loop()
 
@@ -150,9 +229,7 @@ async def test_caption_text_enriches_realtime_speaker_attribution(tmp_path: Path
 
     assert speaker == "Avery"
     assert source == "merged"
-    assert any(
-        event.type == "audio.speaker.attributed" for event in runtime.recent_events()
-    )
+    assert any(event.type == "audio.speaker.attributed" for event in runtime.recent_events())
 
 
 @pytest.mark.asyncio
@@ -168,9 +245,7 @@ async def test_unmatched_caption_does_not_invent_speaker(tmp_path: Path) -> None
         caption_turns=[CaptionTurn("Avery", "Completely unrelated discussion")]
     )
 
-    speaker, source = await runtime._caption_attribution(
-        "Robin create the quarterly briefing"
-    )
+    speaker, source = await runtime._caption_attribution("Robin create the quarterly briefing")
 
     assert speaker == "Meeting audio"
     assert source == "audio_stt"
@@ -197,6 +272,38 @@ async def test_addressed_voice_check_gets_an_audible_reply_without_creating_task
 
     assert runtime.tasks == []
     assert runtime.speech[-1].text.startswith("Yes, I can hear you.")
+    assert any(event.type == "conversation.addressed" for event in runtime.recent_events())
+
+
+@pytest.mark.asyncio
+async def test_grounded_question_uses_validated_artifact_sources(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source = workspace / "source-data"
+    source.mkdir(parents=True)
+    (source / "finance.csv").write_text(
+        "year,quarter,scenario,revenue,expenses,operating_income\n"
+        "2024,Q1,actual,100,70,30\n"
+        "2024,Q2,actual,120,80,40\n"
+    )
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+        )
+    )
+    await runtime.ingest_transcript(
+        "Robin, compare the quarterly finance results and make slides.", "Avery"
+    )
+    task = runtime.tasks[-1]
+    await runtime._task_handles[task.id]
+
+    await runtime.ingest_transcript("Robin, what sources did you use?", "Avery")
+
+    assert len(runtime.tasks) == 1
+    assert any(
+        "finance_2024_quarterly_results" in speech.text or "finance.csv" in speech.text
+        for speech in runtime.speech
+    )
     assert any(event.type == "conversation.addressed" for event in runtime.recent_events())
 
 
@@ -320,7 +427,10 @@ async def test_stop_presenting_deactivates_presentation_session(tmp_path: Path) 
     assert len(runtime.speech) >= speech_before + slide_count
     assert any("Revenue increased" in speech.text for speech in runtime.speech)
     assert any("Key metrics:" in speech.text for speech in runtime.speech)
-    assert sum(1 for event in runtime.recent_events(200) if event.type == "presentation.narration") >= slide_count
+    assert (
+        sum(1 for event in runtime.recent_events(200) if event.type == "presentation.narration")
+        >= slide_count
+    )
     assert any(event.type == "presentation.stopped" for event in runtime.recent_events())
 
 
@@ -414,7 +524,10 @@ async def test_retry_failed_task_reschedules_work(tmp_path: Path) -> None:
     task = await runtime.create_task("Use the finance files to make slides.")
     await runtime._task_handles[task.id]
     assert task.status == TaskStatus.FAILED
-    assert any(speech.text.startswith("I could not complete Use the finance files") for speech in runtime.speech)
+    assert any(
+        speech.text.startswith("I could not complete Use the finance files")
+        for speech in runtime.speech
+    )
     assert any("No CSV or XLSX finance data" in speech.text for speech in runtime.speech)
 
     (source / "finance.csv").write_text(
@@ -478,7 +591,9 @@ async def test_queued_task_can_be_cancelled(tmp_path: Path) -> None:
     (workspace / "generated").mkdir()
     (workspace / "sessions").mkdir()
     (workspace / "cache").mkdir()
-    (source / "finance.csv").write_text("year,quarter,scenario,revenue,expenses,operating_income\n2024,Q1,actual,100,70,30\n")
+    (source / "finance.csv").write_text(
+        "year,quarter,scenario,revenue,expenses,operating_income\n2024,Q1,actual,100,70,30\n"
+    )
     settings = Settings(
         runtime=RuntimeConfig(max_concurrent_tasks=1),
         workspace=WorkspaceConfig(root=workspace),
@@ -602,19 +717,45 @@ async def test_follow_up_preserves_revisioned_artifacts(tmp_path: Path) -> None:
         presentation=PresentationConfig(base_url="http://127.0.0.1:3000/present"),
     )
     runtime = RobinRuntime(settings)
-    await runtime.ingest_transcript("Robin, use the finance files to compare our 2024 quarterly results and make a few slides.", "Avery")
+    await runtime.ingest_transcript(
+        "Robin, use the finance files to compare our 2024 quarterly results and make a few slides.",
+        "Avery",
+    )
     task = runtime.tasks[-1]
     await runtime._task_handles[task.id]
 
-    await runtime.ingest_transcript("Robin, add operating margin and use actuals instead of forecasts.", "Blair")
+    await runtime.ingest_transcript(
+        "Robin, add operating margin and use actuals instead of forecasts.", "Blair"
+    )
     await runtime._task_handles[task.id]
 
     assert task.revision == 2
     assert len(task.source_context_segment_ids) == 2
     assert task.source_context_segment_ids[-1] == runtime.transcript[-1].id
-    decks = sorted((artifact for artifact in runtime.artifacts if artifact.task_id == task.id and artifact.type == "deck_json"), key=lambda artifact: artifact.revision)
-    pptx_decks = sorted((artifact for artifact in runtime.artifacts if artifact.task_id == task.id and artifact.type == "deck_pptx"), key=lambda artifact: artifact.revision)
-    validations = sorted((artifact for artifact in runtime.artifacts if artifact.task_id == task.id and artifact.type == "validation_json"), key=lambda artifact: artifact.revision)
+    decks = sorted(
+        (
+            artifact
+            for artifact in runtime.artifacts
+            if artifact.task_id == task.id and artifact.type == "deck_json"
+        ),
+        key=lambda artifact: artifact.revision,
+    )
+    pptx_decks = sorted(
+        (
+            artifact
+            for artifact in runtime.artifacts
+            if artifact.task_id == task.id and artifact.type == "deck_pptx"
+        ),
+        key=lambda artifact: artifact.revision,
+    )
+    validations = sorted(
+        (
+            artifact
+            for artifact in runtime.artifacts
+            if artifact.task_id == task.id and artifact.type == "validation_json"
+        ),
+        key=lambda artifact: artifact.revision,
+    )
     assert [artifact.revision for artifact in decks] == [1, 2]
     assert [artifact.revision for artifact in pptx_decks] == [1, 2]
     assert [artifact.revision for artifact in validations] == [1, 2]
@@ -653,12 +794,19 @@ async def test_follow_up_targets_most_recent_active_task(tmp_path: Path) -> None
     newer = await runtime.create_task("Use the finance files to make the current deck.")
     await runtime._task_handles[newer.id]
 
-    await runtime.ingest_transcript("Robin, add operating margin and use actuals instead of forecasts.", "Blair")
+    await runtime.ingest_transcript(
+        "Robin, add operating margin and use actuals instead of forecasts.", "Blair"
+    )
     await runtime._task_handles[newer.id]
 
     assert older.revision == 1
     assert newer.revision == 2
-    assert any(artifact.task_id == newer.id and artifact.revision == 2 and artifact.path.endswith("deck_v2.json") for artifact in runtime.artifacts)
+    assert any(
+        artifact.task_id == newer.id
+        and artifact.revision == 2
+        and artifact.path.endswith("deck_v2.json")
+        for artifact in runtime.artifacts
+    )
 
 
 @pytest.mark.asyncio
@@ -683,7 +831,9 @@ async def test_ambiguous_request_requires_confirmation_before_task(tmp_path: Pat
     )
     runtime = RobinRuntime(settings)
 
-    await runtime.ingest_transcript("Could someone compare the finance files and make slides?", "Avery")
+    await runtime.ingest_transcript(
+        "Could someone compare the finance files and make slides?", "Avery"
+    )
 
     assert len(runtime.tasks) == 1
     pending = runtime.tasks[-1]
@@ -728,7 +878,10 @@ async def test_declined_ambiguous_request_cancels_pending_task(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_workspace_rejects_bad_meet_url(tmp_path: Path) -> None:
-    settings = Settings(workspace=WorkspaceConfig(root=tmp_path / "workspace"), database=DatabaseConfig(path=tmp_path / "workspace" / "robin.db"))
+    settings = Settings(
+        workspace=WorkspaceConfig(root=tmp_path / "workspace"),
+        database=DatabaseConfig(path=tmp_path / "workspace" / "robin.db"),
+    )
     runtime = RobinRuntime(settings)
     with pytest.raises(ValueError):
         await runtime.join_meeting("https://example.com/not-meet")
@@ -781,9 +934,18 @@ async def test_validation_failure_blocks_presentation(tmp_path: Path) -> None:
     assert task.status == TaskStatus.FAILED
     assert task.error == "Validation failed: operating_margin_formula"
     assert task.outcome_state == TaskOutcomeState.FAILED
-    assert runtime.speech[-1].text == "I found a validation issue in the analysis, so I will not present it yet."
-    validation = next(artifact for artifact in runtime.artifacts if artifact.task_id == task.id and artifact.type == "validation_json")
-    report = ValidationReport.model_validate_json(runtime.artifact_path(validation.path).read_text())
+    assert (
+        runtime.speech[-1].text
+        == "I found a validation issue in the analysis, so I will not present it yet."
+    )
+    validation = next(
+        artifact
+        for artifact in runtime.artifacts
+        if artifact.task_id == task.id and artifact.type == "validation_json"
+    )
+    report = ValidationReport.model_validate_json(
+        runtime.artifact_path(validation.path).read_text()
+    )
     assert report.ok is False
     assert any(check.name == "operating_margin_formula" and not check.ok for check in report.checks)
 

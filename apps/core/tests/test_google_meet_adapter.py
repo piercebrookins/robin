@@ -447,6 +447,50 @@ async def test_browser_reconnects_once_after_lost_cdp_connection() -> None:
     assert "CDP transport closed" in (browser.last_recovery_reason or "")
 
 
+@pytest.mark.asyncio
+async def test_google_meet_reopens_closed_target_while_waiting_for_admission() -> None:
+    class ClosingAfterJoinPage(SimulatedPageDriver):
+        failed = False
+
+        async def inspect(self):
+            if "join_button" in self.clicked and not self.failed:
+                self.failed = True
+                raise RuntimeError("Target page, context or browser has been closed")
+            return await super().inspect()
+
+        def is_closed(self) -> bool:
+            return self.failed
+
+    class ReopeningBrowser(BrowserController):
+        open_count = 0
+
+        async def open_page(self, name: str, url: str):
+            self.open_count += 1
+            page = ClosingAfterJoinPage() if self.open_count == 1 else SimulatedPageDriver()
+            await page.goto(url, self.config.navigation_timeout_ms)
+            self.pages[name] = page
+            return page
+
+    config = BrowserConfig(
+        automation_mode="simulator",
+        admission_timeout_ms=1_000,
+        ui_action_retries=1,
+        ui_recovery_pause_ms=0,
+    )
+    browser = ReopeningBrowser(config)
+    adapter = GoogleMeetAdapter(browser, config)
+
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    await adapter.join()
+
+    assert adapter.state == MeetingState.LISTENING
+    assert browser.open_count == 2
+    assert any(
+        event.action == "admission_target" and event.recovered
+        for event in adapter.recovery_events or []
+    )
+
+
 class FaultySimulatedPageDriver(SimulatedPageDriver):
     def __init__(self, failures: dict[str, int]):
         super().__init__()

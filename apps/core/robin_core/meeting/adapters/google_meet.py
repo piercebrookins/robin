@@ -134,12 +134,22 @@ class GoogleMeetAdapter:
         deadline = time.monotonic() + self.config.admission_timeout_ms / 1000
         last_text = ""
         pending_seen = False
+        recovery_attempts = 0
         while time.monotonic() < deadline:
             try:
                 snapshot = await asyncio.wait_for(self._page().inspect(), timeout=2.0)
             except TimeoutError:
                 last_text = "Meet page inspection timed out while waiting for admission."
                 await asyncio.sleep(0.1)
+                continue
+            except Exception as exc:
+                last_text = f"Meet page inspection failed while waiting for admission: {exc}"
+                if recovery_attempts >= max(self.config.ui_action_retries, 0):
+                    raise RuntimeError(last_text) from exc
+                recovery_attempts += 1
+                admitted = await self._recover_admission_target(recovery_attempts, exc)
+                if admitted:
+                    return
                 continue
             last_text = " ".join(snapshot.text.casefold().split())
             if self._admission_rejected(last_text):
@@ -170,6 +180,52 @@ class GoogleMeetAdapter:
             screenshot_path=screenshot_path,
         )
         raise TimeoutError("Robin was not admitted to the meeting before the timeout." + detail)
+
+    async def _recover_admission_target(self, attempt: int, error: Exception) -> bool:
+        stale_page = self._page()
+        screenshot_path = await self._capture_recovery_screenshot(
+            "admission_target", attempt, stale_page
+        )
+        self._record_recovery(
+            "admission_target",
+            attempt,
+            recovered=False,
+            error=str(error),
+            page=stale_page,
+            screenshot_path=screenshot_path,
+        )
+        if not self.current_url:
+            raise RuntimeError("Cannot recover admission without a meeting URL")
+        self.meet_page = await self.browser.open_page("meet", self.current_url)
+        if await self._is_admitted():
+            self._record_recovery(
+                "admission_target",
+                attempt,
+                recovered=True,
+                error=str(error),
+                page=self.meet_page,
+            )
+            return True
+        snapshot = await self.meet_page.inspect()
+        text = " ".join(snapshot.text.casefold().split())
+        if not self._admission_pending(text):
+            await self.enter_prejoin()
+            await self.camera_off()
+            await self.mute()
+            await self._click_with_recovery(
+                "join_button",
+                MEET_SELECTORS["join_button"],
+                self.config.prejoin_timeout_ms,
+            )
+            self.state = MeetingState.REQUESTING_ADMISSION
+        self._record_recovery(
+            "admission_target",
+            attempt,
+            recovered=True,
+            error=str(error),
+            page=self.meet_page,
+        )
+        return False
 
     async def _is_admitted(self) -> bool:
         page = self._page()

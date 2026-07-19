@@ -42,6 +42,9 @@ Implemented and automated as of July 19, 2026:
 - Secret redaction, prompt-injection boundaries, bounded model context, and enforced memory/disk budgets.
 - Dashboard views for hearing, speech, beliefs, tool actions, confirmation waits, and resource use.
 - Persisted working, awaiting-confirmation, blocked, failed, verified, and cancelled task outcomes.
+- Validated-artifact context for grounded source Q&A before and after a narrated presentation.
+- A tested emergency stop that interrupts speech and halts capture, work, sharing, and meeting state.
+- Recovery that reopens a closed Meet target and resumes the bounded admission flow.
 
 Not yet complete and therefore not grounds for calling the product finished:
 

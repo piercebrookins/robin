@@ -28,7 +28,8 @@ The MVP is a hybrid agent system rather than a pure visual computer-use loop:
 Robin runs in a dedicated logged-in macOS session. The one-command local workflow, realtime
 transcription/barge-in, durable sourced memory, semantic browser operator, exact approval tokens,
 secret redaction, resource budgets, streaming PCM speech, caption/STT speaker merging, bounded CDP
-reconnection, and explicit task outcome states are implemented. Full autonomy is not yet proven:
+reconnection/target reopening, grounded artifact Q&A, a full emergency kill switch, and explicit
+task outcome states are implemented. Full autonomy is not yet proven:
 reliable named-speaker attribution without caption metadata, rich-format editing, broader native
 computer tools, and three qualifying real-Meet rehearsals remain open.
 
@@ -56,6 +57,10 @@ Every page is re-inspected after an action. Password input is forbidden, page co
 untrusted, and consequential controls require an exact confirmation token cryptographically bound
 to the current page, action, element reference, field name, and arguments. Native Computer Use is
 kept behind the narrower Chrome share-picker adapter because browser APIs cannot access that UI.
+
+Direct meeting Q&A receives a bounded view of the three newest validated decks: task outcome,
+revision, slide claims/metrics, and cited source labels/paths. The response policy may use only that
+validated context plus recent transcript and durable memory, and must state when evidence is absent.
 
 ---
 
@@ -1969,6 +1974,12 @@ Emergency stop must:
 6. Leave the meeting when possible.
 7. Preserve logs and session state.
 8. Disable auto-restart until manually reset.
+
+The runtime implementation interrupts native playback first, stops and awaits listening, task,
+speech, and memory handles, disables calendar auto-join, stops sharing, forcibly deactivates every
+presentation session, cancels nonterminal tasks with a persisted outcome, stops capture, and leaves
+Meet. Individual cleanup failures are retained on `runtime.emergency_stop` rather than preventing
+the remaining shutdown actions.
 
 ---
 

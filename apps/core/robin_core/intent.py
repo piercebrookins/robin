@@ -14,7 +14,9 @@ from .schemas import MeetingIntent, MeetingMemoryItem, RobinTask, TranscriptSegm
 class IntentClassifier:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.client = AsyncOpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
+        self.client = (
+            AsyncOpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
+        )
 
     async def classify(self, text: str, active_tasks: list[RobinTask]) -> MeetingIntent:
         if self.client:
@@ -35,7 +37,10 @@ class IntentClassifier:
         return self._classify_local(text, active_tasks)
 
     async def _classify_openai(self, text: str, active_tasks: list[RobinTask]) -> MeetingIntent:
-        active = [{"id": str(task.id), "title": task.title, "status": task.status} for task in active_tasks]
+        active = [
+            {"id": str(task.id), "title": task.title, "status": task.status}
+            for task in active_tasks
+        ]
         response = await self.client.responses.create(
             model=self.settings.model.primary,
             input=[
@@ -57,11 +62,26 @@ class IntentClassifier:
     def _classify_local(self, text: str, active_tasks: list[RobinTask]) -> MeetingIntent:
         lowered = text.lower()
         addressed = bool(re.search(r"\brobin\b", lowered))
+        is_question = "?" in text or bool(
+            re.search(r"\b(?:what|which|who|why|how|where|when|did|do|can)\b", lowered)
+        )
         is_cancel = any(word in lowered for word in ["cancel", "stop working", "never mind"])
         is_status = any(word in lowered for word in ["status", "how is", "where are we"])
-        is_mod = bool(active_tasks) and any(word in lowered for word in ["add", "change", "use", "instead", "exclude", "include", "make it"])
-        asks_work = any(phrase in lowered for phrase in ["make", "create", "build", "compare", "analyze", "show", "find", "pull"])
-        ref_id: UUID | None = active_tasks[0].id if active_tasks and (is_mod or is_cancel or is_status) else None
+        is_mod = (
+            bool(active_tasks)
+            and not is_question
+            and any(
+                word in lowered
+                for word in ["add", "change", "use", "instead", "exclude", "include", "make it"]
+            )
+        )
+        asks_work = any(
+            phrase in lowered
+            for phrase in ["make", "create", "build", "compare", "analyze", "show", "find", "pull"]
+        )
+        ref_id: UUID | None = (
+            active_tasks[0].id if active_tasks and (is_mod or is_cancel or is_status) else None
+        )
         if is_cancel:
             classification = "task_cancellation"
         elif is_status:
@@ -94,7 +114,9 @@ class IntentClassifier:
             referenced_task_id=ref_id,
             should_acknowledge=accepted,
             should_ask_confirmation=classification == "possible_task",
-            clarification_question="Should I take that on?" if classification == "possible_task" else None,
+            clarification_question="Should I take that on?"
+            if classification == "possible_task"
+            else None,
         )
 
     async def respond(
@@ -103,6 +125,7 @@ class IntentClassifier:
         active_tasks: list[RobinTask],
         meeting_context: list[TranscriptSegment] | None = None,
         memory_context: list[MeetingMemoryItem] | None = None,
+        grounded_artifacts: list[dict] | None = None,
     ) -> str:
         lowered = text.casefold()
         if any(
@@ -110,6 +133,14 @@ class IntentClassifier:
             for phrase in ("can you hear me", "do you hear me", "are you listening")
         ):
             return "Yes, I can hear you. I’m listening for requests addressed to Robin."
+        artifacts = grounded_artifacts or []
+        if "source" in lowered and artifacts:
+            sources = artifacts[0].get("sources", [])
+            labels = [str(source.get("label") or source.get("path")) for source in sources[:4]]
+            if labels:
+                return (
+                    "I used " + ", ".join(labels) + ", with the claims checked against those files."
+                )
         if self.client:
             try:
                 response = await asyncio.wait_for(
@@ -120,8 +151,10 @@ class IntentClassifier:
                                 "role": "system",
                                 "content": (
                                     "You are Robin, a concise meeting coworker. Answer the directly "
-                                    "addressed question in at most two short sentences. Do not claim to "
-                                    "have performed work or accessed data unless the turn says so."
+                                    "addressed question in at most two short sentences. Ground claims "
+                                    "only in the supplied validated_artifacts, meeting context, and durable "
+                                    "memory. Name the source labels when asked. If the evidence does not "
+                                    "answer the question, say so instead of guessing."
                                 ),
                             },
                             {
@@ -148,12 +181,12 @@ class IntentClassifier:
                                                 "deadline": item.deadline,
                                                 "status": item.status,
                                                 "source_segment_ids": [
-                                                    str(value)
-                                                    for value in item.source_segment_ids
+                                                    str(value) for value in item.source_segment_ids
                                                 ],
                                             }
                                             for item in (memory_context or [])[-40:]
                                         ],
+                                        "validated_artifacts": artifacts[:3],
                                     }
                                 ),
                             },
@@ -166,7 +199,9 @@ class IntentClassifier:
                     return reply
             except Exception:
                 pass
-        return "I heard you. Ask me to analyze the workspace, prepare slides, or report task status."
+        return (
+            "I heard you. Ask me to analyze the workspace, prepare slides, or report task status."
+        )
 
     def _title_from_text(self, text: str) -> str:
         cleaned = re.sub(r"(?i)\brobin\b[:,]?\s*", "", text).strip()
