@@ -16,7 +16,7 @@ from robin_core.config import (
     WorkspaceConfig,
 )
 from robin_core.runtime import RobinRuntime
-from robin_core.schemas import TaskStatus, ValidationReport
+from robin_core.schemas import MeetingState, RuntimeState, TaskStatus, ValidationReport
 
 
 @pytest.mark.asyncio
@@ -97,6 +97,27 @@ async def test_duplicate_join_is_idempotent_and_can_enable_listening(tmp_path: P
         for event in runtime.recent_events()
     )
     await runtime.stop_listening_loop()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_join_cannot_promote_waiting_room_to_listening(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+        )
+    )
+    url = "https://meet.google.com/abc-defg-hij"
+    runtime.meeting_url = url
+    runtime.meeting_state = MeetingState.PREJOIN
+    runtime.runtime_state = RuntimeState.JOINING_MEETING
+
+    with pytest.raises(RuntimeError, match="waiting for admission"):
+        await runtime.join_meeting(url, start_listening=True)
+
+    assert runtime.meeting_state == MeetingState.PREJOIN
+    assert runtime._listen_handle is None
 
 
 @pytest.mark.asyncio

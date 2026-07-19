@@ -145,16 +145,18 @@ class RobinRuntime:
         start_listening: bool = False,
     ) -> RuntimeSnapshot:
         async with self._join_lock:
-            active_states = {
-                MeetingState.NAVIGATING,
-                MeetingState.PREJOIN,
-                MeetingState.REQUESTING_ADMISSION,
+            admitted_states = {
                 MeetingState.JOINED,
                 MeetingState.LISTENING,
                 MeetingState.SPEAKING,
                 MeetingState.PRESENTING,
             }
-            if self.meeting_url == meeting_url and self.meeting_state in active_states:
+            joining_states = {
+                MeetingState.NAVIGATING,
+                MeetingState.PREJOIN,
+                MeetingState.REQUESTING_ADMISSION,
+            }
+            if self.meeting_url == meeting_url and self.meeting_state in admitted_states:
                 await self.emit_event(
                     "meeting.join.duplicate_suppressed",
                     {"meeting_url": meeting_url},
@@ -163,7 +165,9 @@ class RobinRuntime:
                 if start_listening:
                     await self.start_listening_loop()
                 return await self.publish()
-            if self.meeting_url and self.meeting_state in active_states:
+            if self.meeting_url == meeting_url and self.meeting_state in joining_states:
+                raise RuntimeError("Robin is still waiting for admission to this meeting.")
+            if self.meeting_url and self.meeting_state in admitted_states | joining_states:
                 raise ValueError(
                     "Robin is already in a meeting. Leave it before joining another link."
                 )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
@@ -84,7 +85,7 @@ class GoogleMeetAdapter:
     async def join(self) -> None:
         if not self.current_url:
             raise ValueError("No meeting URL has been supplied.")
-        if await self._page().is_visible(MEET_SELECTORS["joined_signal"], 1_000):
+        if await self._is_admitted():
             await self.camera_off()
             await self.mute()
             self.state = MeetingState.LISTENING
@@ -95,11 +96,63 @@ class GoogleMeetAdapter:
         await self._click_with_recovery(
             "join_button", MEET_SELECTORS["join_button"], self.config.prejoin_timeout_ms
         )
-        if not await self._page().is_visible(
-            MEET_SELECTORS["joined_signal"], self.config.admission_timeout_ms
-        ):
-            raise TimeoutError("Robin was not admitted to the meeting before the timeout.")
+        await self._wait_for_admission()
         self.state = MeetingState.LISTENING
+
+    async def _wait_for_admission(self) -> None:
+        deadline = time.monotonic() + self.config.admission_timeout_ms / 1000
+        last_text = ""
+        while time.monotonic() < deadline:
+            snapshot = await self._page().inspect()
+            last_text = " ".join(snapshot.text.casefold().split())
+            if self._admission_rejected(last_text):
+                raise PermissionError(
+                    "Google Meet rejected admission: " + snapshot.text[:300]
+                )
+            if not self._admission_pending(last_text) and await self._is_admitted():
+                return
+            await asyncio.sleep(min(self.config.ui_recovery_pause_ms / 1000, 0.5) or 0.1)
+        detail = f" Last page text: {last_text[:240]}" if last_text else ""
+        raise TimeoutError(
+            "Robin was not admitted to the meeting before the timeout." + detail
+        )
+
+    async def _is_admitted(self) -> bool:
+        page = self._page()
+        snapshot = await page.inspect()
+        text = " ".join(snapshot.text.casefold().split())
+        if self._admission_pending(text) or self._admission_rejected(text):
+            return False
+        joined = await page.is_visible(MEET_SELECTORS["joined_signal"], 500)
+        own_microphone = await page.is_visible(MEET_SELECTORS["mute_button"], 250) or await page.is_visible(
+            MEET_SELECTORS["unmute_button"], 250
+        )
+        return joined and own_microphone
+
+    @staticmethod
+    def _admission_pending(text: str) -> bool:
+        return any(
+            marker in text
+            for marker in (
+                "please wait until a meeting host brings you into the call",
+                "asking to join",
+                "waiting for the host",
+                "someone in the meeting should let you in soon",
+            )
+        )
+
+    @staticmethod
+    def _admission_rejected(text: str) -> bool:
+        return any(
+            marker in text
+            for marker in (
+                "you can't join this video call",
+                "you cannot join this video call",
+                "your request to join was denied",
+                "no one can join a meeting unless invited or admitted",
+                "meeting code has expired",
+            )
+        )
 
     async def leave(self) -> None:
         if self.meet_page and self.state not in {MeetingState.IDLE, MeetingState.ENDED}:

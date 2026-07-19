@@ -72,6 +72,55 @@ async def test_google_meet_join_recovers_an_existing_joined_tab() -> None:
 
 
 @pytest.mark.asyncio
+async def test_google_meet_waiting_room_leave_button_is_not_admission() -> None:
+    config = BrowserConfig(automation_mode="simulator", admission_timeout_ms=20)
+    adapter = GoogleMeetAdapter(BrowserController(config), config)
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    page = adapter.meet_page
+    assert isinstance(page, SimulatedPageDriver)
+    page.visible_keys.add("leave_button")
+
+    async def waiting_snapshot():
+        snapshot = await SimulatedPageDriver.inspect(page)
+        return type(snapshot)(
+            url=snapshot.url,
+            title=snapshot.title,
+            text="Please wait until a meeting host brings you into the call",
+            elements=snapshot.elements,
+        )
+
+    page.inspect = waiting_snapshot  # type: ignore[method-assign]
+
+    with pytest.raises(TimeoutError, match="not admitted"):
+        await adapter.join()
+
+    assert adapter.state != MeetingState.LISTENING
+
+
+@pytest.mark.asyncio
+async def test_google_meet_rejected_admission_fails_immediately() -> None:
+    config = BrowserConfig(automation_mode="simulator", admission_timeout_ms=1_000)
+    adapter = GoogleMeetAdapter(BrowserController(config), config)
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    page = adapter.meet_page
+    assert isinstance(page, SimulatedPageDriver)
+
+    async def rejected_snapshot():
+        snapshot = await SimulatedPageDriver.inspect(page)
+        return type(snapshot)(
+            url=snapshot.url,
+            title=snapshot.title,
+            text="You can't join this video call. No one can join a meeting unless invited or admitted by the host.",
+            elements=snapshot.elements,
+        )
+
+    page.inspect = rejected_snapshot  # type: ignore[method-assign]
+
+    with pytest.raises(PermissionError, match="rejected admission"):
+        await adapter.join()
+
+
+@pytest.mark.asyncio
 async def test_google_meet_leave_closes_the_controlled_meet_tab() -> None:
     config = BrowserConfig(automation_mode="simulator")
     browser = BrowserController(config)
