@@ -45,6 +45,8 @@ Implemented and automated as of July 19, 2026:
 - Validated-artifact context for grounded source Q&A before and after a narrated presentation.
 - A tested emergency stop that interrupts speech and halts capture, work, sharing, and meeting state.
 - Recovery that reopens a closed Meet target and resumes the bounded admission flow.
+- Durable second-participant rehearsal certification that combines explicit observed outcomes with
+  automated audio, grounding, sharing, narration, interaction, cleanup, fresh-start, and task-diversity checks.
 
 Not yet complete and therefore not grounds for calling the product finished:
 

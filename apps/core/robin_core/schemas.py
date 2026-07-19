@@ -196,7 +196,9 @@ class SourceCitation(BaseModel):
 
 
 class SlideSpec(BaseModel):
-    type: Literal["title", "executive_summary", "chart", "key_metrics", "findings", "methodology", "sources"]
+    type: Literal[
+        "title", "executive_summary", "chart", "key_metrics", "findings", "methodology", "sources"
+    ]
     title: str
     body: list[str] = Field(default_factory=list)
     chart_id: UUID | None = None
@@ -292,6 +294,36 @@ class PresentationSession(BaseModel):
     slide_count: int = 0
     active: bool = False
     updated_at: datetime = Field(default_factory=now_utc)
+
+
+class RehearsalConfirmationRequest(BaseModel):
+    task_id: UUID
+    participant_name: str = Field(min_length=1, max_length=160)
+    robin_heard_participant: bool
+    correct_understanding: bool
+    grounded_output: bool
+    correct_shared_surface: bool
+    audible_narration: bool
+    live_qa_or_revision: bool
+    graceful_leave: bool
+    notes: str = Field(default="", max_length=2_000)
+
+
+class RehearsalEvidence(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    created_at: datetime = Field(default_factory=now_utc)
+    runtime_instance_id: UUID
+    meeting_id: UUID
+    task_id: UUID
+    run_number: int
+    consecutive_passes: int
+    participant_name: str
+    notes: str = ""
+    confirmations: dict[str, bool]
+    automated_checks: dict[str, bool]
+    passed: bool
+    commit: str | None = None
+    evidence_path: str | None = None
 
 
 class CalendarEvent(BaseModel):

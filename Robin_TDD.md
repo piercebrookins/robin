@@ -1981,6 +1981,16 @@ presentation session, cancels nonterminal tasks with a persisted outcome, stops 
 Meet. Individual cleanup failures are retained on `runtime.emergency_stop` rather than preventing
 the remaining shutdown actions.
 
+### 29.3 Real-rehearsal certification
+
+After the meeting has ended, `POST /api/rehearsals/confirm` accepts the second participant's exact
+outcome checklist and task identifier. The runtime independently requires meeting-audio STT,
+completed BlackHole playback, a verified task and validation report, observable presentation start
+and completion, narration of every slide, Q&A or revision, meeting leave, and restored inactive
+capture/presentation state. Evidence is stored outside resettable session data under
+`RobinWorkspace/rehearsals/`. Consecutive progress additionally requires a new runtime instance and
+a different normalized task request; any failed or duplicate certification resets the streak.
+
 ---
 
 ## 30. Error Handling and Recovery

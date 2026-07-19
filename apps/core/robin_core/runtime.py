@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import resource
+import subprocess
 import sys
 import time
 from difflib import SequenceMatcher
@@ -37,10 +39,13 @@ from .schemas import (
     RuntimeMetrics,
     RuntimeState,
     PresentationSession,
+    RehearsalConfirmationRequest,
+    RehearsalEvidence,
     SpeechRecord,
     TaskStatus,
     TaskOutcomeState,
     TranscriptSegment,
+    ValidationReport,
     WorkspaceSnapshot,
     now_utc,
 )
@@ -52,6 +57,7 @@ class RobinRuntime:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or load_settings()
         self._started_monotonic = time.monotonic()
+        self._runtime_instance_id = uuid4()
         self.workspace = Workspace(self.settings.workspace)
         self.store = Store(self.settings.database.path)
         self.intent = IntentClassifier(self.settings)
@@ -504,6 +510,153 @@ class RobinRuntime:
             component="runtime",
         )
         return await self.publish()
+
+    async def record_rehearsal_confirmation(
+        self, request: RehearsalConfirmationRequest
+    ) -> RehearsalEvidence:
+        task = self._find_task(request.task_id)
+        if task.meeting_id != self.meeting_id:
+            raise ValueError("The task does not belong to the current meeting")
+        evidence_dir = self.settings.workspace.root / "rehearsals"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        previous = self._rehearsal_evidence(evidence_dir)
+        previous_passed = [item for item in previous if item.passed]
+        last_passed = previous_passed[-1] if previous_passed else None
+        events = [event for event in self.recent_events(500) if event.meeting_id == self.meeting_id]
+        task_events = [event for event in events if event.task_id == task.id]
+        transcript = [
+            segment for segment in self.transcript if segment.meeting_id == self.meeting_id
+        ]
+        validation = self._latest_artifact(task.id, "validation_json")
+        validation_ok = False
+        if validation is not None:
+            try:
+                validation_ok = ValidationReport.model_validate_json(
+                    self.workspace.resolve(validation.path).read_text(encoding="utf-8")
+                ).ok
+            except Exception:
+                validation_ok = False
+        narration_count = sum(event.type == "presentation.narration" for event in task_events)
+        try:
+            slide_count = self._deck_slide_count(task.id)
+        except Exception:
+            slide_count = 0
+        outbound_audio = any(
+            speech.error is None
+            and speech.completed_at is not None
+            and "blackhole" in (speech.playback_device or "").casefold()
+            for speech in self.speech
+        )
+        inbound_audio = any(segment.source in {"audio_stt", "merged"} for segment in transcript)
+        live_interaction = task.revision > 1 or any(
+            event.type == "conversation.addressed" for event in events
+        )
+        normalized_task = " ".join(task.requested_outcome.casefold().split())
+        prior_task = None
+        if last_passed:
+            try:
+                prior_task = str(
+                    json.loads(
+                        (self.settings.workspace.root / last_passed.evidence_path).read_text(
+                            encoding="utf-8"
+                        )
+                    ).get("task_fingerprint", "")
+                )
+            except Exception:
+                prior_task = None
+        automated_checks = {
+            "fresh_runtime": last_passed is None
+            or last_passed.runtime_instance_id != self._runtime_instance_id,
+            "different_task": not prior_task or prior_task != normalized_task,
+            "inbound_audio_transcribed": inbound_audio,
+            "outbound_audio_routed_to_blackhole": outbound_audio,
+            "task_verified": task.outcome_state == TaskOutcomeState.VERIFIED,
+            "grounding_validation_passed": validation_ok,
+            "presentation_started": any(
+                event.type == "presentation.started" for event in task_events
+            ),
+            "presentation_completed": any(
+                event.type == "presentation.completed" for event in task_events
+            ),
+            "every_slide_narrated": slide_count > 0 and narration_count >= slide_count,
+            "live_interaction_observed": live_interaction,
+            "meeting_left": any(event.type == "meeting.left" for event in events),
+            "state_restored": self.runtime_state == RuntimeState.READY
+            and self.meeting_state in {MeetingState.ENDED, MeetingState.IDLE}
+            and not self.snapshot().capture_loop_running
+            and not self.snapshot().presenting,
+        }
+        confirmations = {
+            "robin_heard_participant": request.robin_heard_participant,
+            "correct_understanding": request.correct_understanding,
+            "grounded_output": request.grounded_output,
+            "correct_shared_surface": request.correct_shared_surface,
+            "audible_narration": request.audible_narration,
+            "live_qa_or_revision": request.live_qa_or_revision,
+            "graceful_leave": request.graceful_leave,
+        }
+        passed = all(automated_checks.values()) and all(confirmations.values())
+        prior_streak = previous[-1].consecutive_passes if previous and previous[-1].passed else 0
+        evidence = RehearsalEvidence(
+            runtime_instance_id=self._runtime_instance_id,
+            meeting_id=self.meeting_id,
+            task_id=task.id,
+            run_number=len(previous) + 1,
+            consecutive_passes=prior_streak + 1 if passed else 0,
+            participant_name=redact_text(request.participant_name.strip()),
+            notes=redact_text(request.notes.strip()),
+            confirmations=confirmations,
+            automated_checks=automated_checks,
+            passed=passed,
+            commit=self._git_commit(),
+        )
+        filename = (
+            f"rehearsal-{evidence.created_at.strftime('%Y%m%dT%H%M%SZ')}-"
+            f"{str(evidence.id)[:8]}.json"
+        )
+        relative_path = (Path("rehearsals") / filename).as_posix()
+        evidence.evidence_path = relative_path
+        body = evidence.model_dump(mode="json")
+        body["task_fingerprint"] = normalized_task
+        (self.settings.workspace.root / relative_path).write_text(
+            json.dumps(body, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        await self.emit_event(
+            "rehearsal.confirmed",
+            {
+                "evidence_path": relative_path,
+                "passed": passed,
+                "consecutive_passes": evidence.consecutive_passes,
+                "failed_checks": [
+                    name for name, ok in {**automated_checks, **confirmations}.items() if not ok
+                ],
+            },
+            task_id=task.id,
+            component="rehearsal",
+        )
+        return evidence
+
+    @staticmethod
+    def _git_commit() -> str | None:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        value = result.stdout.strip()
+        return value or None
+
+    @staticmethod
+    def _rehearsal_evidence(evidence_dir: Path) -> list[RehearsalEvidence]:
+        evidence: list[RehearsalEvidence] = []
+        for path in sorted(evidence_dir.glob("rehearsal-*.json")):
+            try:
+                evidence.append(RehearsalEvidence.model_validate_json(path.read_text()))
+            except Exception:
+                continue
+        return sorted(evidence, key=lambda item: item.created_at)
 
     async def ingest_transcript(
         self,

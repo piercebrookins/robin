@@ -192,6 +192,23 @@ export type BrowserOperatorResult = {
   approval_description: string | null;
 };
 
+export type RehearsalEvidence = {
+  id: string;
+  created_at: string;
+  runtime_instance_id: string;
+  meeting_id: string;
+  task_id: string;
+  run_number: number;
+  consecutive_passes: number;
+  participant_name: string;
+  notes: string;
+  confirmations: Record<string, boolean>;
+  automated_checks: Record<string, boolean>;
+  passed: boolean;
+  commit: string | null;
+  evidence_path: string | null;
+};
+
 export type PresentationSession = {
   task_id: string;
   active_slide: number;

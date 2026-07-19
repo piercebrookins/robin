@@ -69,7 +69,7 @@ p { color: var(--muted); line-height: 1.5; }
 .mini-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 
 .operator-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr); gap: 14px; }
-.timeline-section, .work-section, .system-details { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+.timeline-section, .work-section, .system-details, .rehearsal-panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
 .section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
 .section-heading p { margin: 0; font-size: .82rem; }
 .event-count { color: var(--muted); font-size: .75rem; white-space: nowrap; }
@@ -109,6 +109,17 @@ p { color: var(--muted); line-height: 1.5; }
 .memory-list small { color: var(--muted); font-size: .7rem; }
 
 .system-details { margin-top: 14px; }
+.rehearsal-panel { margin-top: 14px; }
+.rehearsal-fields { display: grid; gap: 14px; }
+.rehearsal-fields > label { display: grid; gap: 6px; color: var(--muted); font-size: .78rem; font-weight: 650; }
+.rehearsal-fields textarea { margin: 0; }
+.rehearsal-fields > button { justify-self: start; }
+.rehearsal-checks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 18px; }
+.rehearsal-checks label { display: flex; gap: 8px; align-items: flex-start; color: var(--ink); font-size: .82rem; }
+.rehearsal-checks input { width: 17px; min-height: 17px; margin: 1px 0 0; flex: none; }
+.rehearsal-result { border-left: 3px solid var(--danger); background: #fff0ed; border-radius: 7px; padding: 10px 12px; display: grid; gap: 3px; }
+.rehearsal-result.passed { border-left-color: var(--accent); background: var(--soft); }
+.rehearsal-result span, .rehearsal-result small { color: var(--muted); font-size: .72rem; overflow-wrap: anywhere; }
 .system-details summary { cursor: pointer; font-weight: 700; }
 .details-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 20px; }
 .audio-checks { border-top: 1px solid var(--line); padding-top: 18px; grid-column: 1 / -1; }
@@ -153,6 +164,7 @@ p { color: var(--muted); line-height: 1.5; }
   .join-row button { flex: 1; }
   .now-strip { align-items: flex-start; flex-wrap: wrap; }
   .metric-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rehearsal-checks { grid-template-columns: 1fr; }
   .state-chips { margin-left: 50px; justify-content: flex-start; }
 }
 

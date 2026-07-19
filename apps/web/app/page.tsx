@@ -19,10 +19,19 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { CORE_URL, CORE_WS_URL, getMetrics, getPreflight, getState, postJson } from "../lib/api";
-import type { Artifact, BrowserOperatorResult, EventEnvelope, PreflightSnapshot, RuntimeMetrics, RuntimeSnapshot } from "../lib/types";
+import type { Artifact, BrowserOperatorResult, EventEnvelope, PreflightSnapshot, RehearsalEvidence, RuntimeMetrics, RuntimeSnapshot } from "../lib/types";
 
 const ACTIVE_TASKS = ["AWAITING_CLARIFICATION", "ACCEPTED", "QUEUED", "EXECUTING", "VALIDATING", "READY_TO_PRESENT", "PRESENTING"];
 const ACTIVE_MEETING = ["NAVIGATING", "PREJOIN", "REQUESTING_ADMISSION", "JOINED", "LISTENING", "SPEAKING", "PRESENTING"];
+const REHEARSAL_CHECKS = [
+  ["robin_heard_participant", "Robin heard and correctly transcribed me"],
+  ["correct_understanding", "Robin understood the requested task"],
+  ["grounded_output", "The output was grounded in the supplied files"],
+  ["correct_shared_surface", "I saw the correct Robin presentation"],
+  ["audible_narration", "I heard Robin narrate the slides"],
+  ["live_qa_or_revision", "Robin completed a live Q&A or revision"],
+  ["graceful_leave", "Robin left cleanly after the rehearsal"],
+] as const;
 
 export default function Dashboard() {
   const [state, setState] = useState<RuntimeSnapshot | null>(null);
@@ -37,6 +46,12 @@ export default function Dashboard() {
   const [metrics, setMetrics] = useState<RuntimeMetrics | null>(null);
   const [browserRequest, setBrowserRequest] = useState("");
   const [browserResult, setBrowserResult] = useState<BrowserOperatorResult | null>(null);
+  const [participantName, setParticipantName] = useState("");
+  const [rehearsalNotes, setRehearsalNotes] = useState("");
+  const [rehearsalChecks, setRehearsalChecks] = useState<Record<string, boolean>>(
+    Object.fromEntries(REHEARSAL_CHECKS.map(([key]) => [key, false])),
+  );
+  const [rehearsalResult, setRehearsalResult] = useState<RehearsalEvidence | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -92,6 +107,8 @@ export default function Dashboard() {
     [state],
   );
   const inMeeting = state ? ACTIVE_MEETING.includes(state.meeting_state) : false;
+  const certifiableTask = state?.tasks.slice().reverse().find((task) => task.status === "COMPLETED");
+  const rehearsalChecklistComplete = REHEARSAL_CHECKS.every(([key]) => rehearsalChecks[key]);
   const currentAction = describeCurrentAction(state, activeTask?.title, activeTask?.status);
 
   async function act(path: string, body?: unknown, label = "Working") {
@@ -162,6 +179,25 @@ export default function Dashboard() {
         approval_token: approvalToken ?? null,
       });
       setBrowserResult(result);
+      setError(null);
+    } catch (err) {
+      setError(readError(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function certifyRehearsal() {
+    if (!certifiableTask) return;
+    setBusy("Certifying rehearsal");
+    try {
+      const result = await postJson<RehearsalEvidence>("/api/rehearsals/confirm", {
+        task_id: certifiableTask.id,
+        participant_name: participantName.trim(),
+        notes: rehearsalNotes.trim(),
+        ...rehearsalChecks,
+      });
+      setRehearsalResult(result);
       setError(null);
     } catch (err) {
       setError(readError(err));
@@ -303,6 +339,49 @@ export default function Dashboard() {
         </aside>
       </div>
 
+      {certifiableTask && !inMeeting && (
+        <section className="rehearsal-panel" aria-labelledby="rehearsal-title">
+          <div className="section-heading">
+            <div>
+              <h2 id="rehearsal-title">Second-participant rehearsal proof</h2>
+              <p>Complete this from the device/account that heard and watched Robin. Automated evidence is checked separately.</p>
+            </div>
+          </div>
+          <div className="rehearsal-fields">
+            <label>
+              <span>Participant name</span>
+              <input value={participantName} onChange={(event) => setParticipantName(event.target.value)} placeholder="Name of the verifying participant" />
+            </label>
+            <div className="rehearsal-checks">
+              {REHEARSAL_CHECKS.map(([key, label]) => (
+                <label key={key}>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(rehearsalChecks[key])}
+                    onChange={(event) => setRehearsalChecks((current) => ({ ...current, [key]: event.target.checked }))}
+                  />
+                  <span>{label}</span>
+                </label>
+              ))}
+            </div>
+            <label>
+              <span>Notes (optional)</span>
+              <textarea value={rehearsalNotes} onChange={(event) => setRehearsalNotes(event.target.value)} placeholder="What task, question, or revision did you verify?" />
+            </label>
+            <button className="primary" onClick={certifyRehearsal} disabled={busy !== null || rehearsalResult !== null || !participantName.trim() || !rehearsalChecklistComplete}>
+              <CheckCircle2 size={17} /> Certify this rehearsal
+            </button>
+            {rehearsalResult && (
+              <div className={`rehearsal-result ${rehearsalResult.passed ? "passed" : "failed"}`} role="status">
+                <strong>{rehearsalResult.passed ? `Rehearsal passed — ${rehearsalResult.consecutive_passes} consecutive` : "Rehearsal did not pass every automated check"}</strong>
+                <span>{rehearsalResult.evidence_path}</span>
+                {!rehearsalResult.passed && <small>Failed: {Object.entries(rehearsalResult.automated_checks).filter(([, ok]) => !ok).map(([name]) => name.replaceAll("_", " ")).join(" · ")}</small>}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
       <details className="system-details">
         <summary>System details and manual controls</summary>
         <div className="details-grid">
@@ -441,6 +520,7 @@ function eventMessage(event: EventEnvelope) {
     "presentation.started": "Started presenting",
     "presentation.stopped": "Stopped presenting",
     "meeting.left": "Left the meeting",
+    "rehearsal.confirmed": event.payload.passed ? `Certified rehearsal (${String(event.payload.consecutive_passes ?? 0)} consecutive)` : "Rehearsal evidence did not pass every check",
   };
   return messages[event.type] ?? event.type.replaceAll(".", " ");
 }

@@ -22,6 +22,8 @@ from .schemas import (
     JoinMeetingRequest,
     PresentationGotoRequest,
     PresentationSession,
+    RehearsalConfirmationRequest,
+    RehearsalEvidence,
     RuntimeSnapshot,
     RuntimeMetrics,
     TaskCreateRequest,
@@ -57,13 +59,20 @@ async def shutdown() -> None:
 @app.get("/health")
 async def health() -> dict:
     runtime.refresh_health()
-    return {"ok": True, "state": runtime.runtime_state, "health": [item.model_dump(mode="json") for item in runtime.health]}
+    return {
+        "ok": True,
+        "state": runtime.runtime_state,
+        "health": [item.model_dump(mode="json") for item in runtime.health],
+    }
 
 
 @app.get("/api/preflight")
 async def preflight() -> dict:
     checks = run_preflight(runtime.settings)
-    return {"ok": all(item.ok for item in checks), "checks": [item.model_dump(mode="json") for item in checks]}
+    return {
+        "ok": all(item.ok for item in checks),
+        "checks": [item.model_dump(mode="json") for item in checks],
+    }
 
 
 @app.post("/api/audio/bridge/refresh", response_model=RuntimeSnapshot)
@@ -80,9 +89,7 @@ async def test_audio_output() -> RuntimeSnapshot:
     try:
         return await runtime.test_audio_output()
     except Exception as exc:
-        await runtime.emit_event(
-            "audio.output.test.failed", {"error": str(exc)}, component="audio"
-        )
+        await runtime.emit_event("audio.output.test.failed", {"error": str(exc)}, component="audio")
         await runtime.publish()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -92,9 +99,7 @@ async def test_audio_input() -> dict:
     try:
         return await runtime.test_audio_input()
     except Exception as exc:
-        await runtime.emit_event(
-            "audio.input.test.failed", {"error": str(exc)}, component="audio"
-        )
+        await runtime.emit_event("audio.input.test.failed", {"error": str(exc)}, component="audio")
         await runtime.publish()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -356,7 +361,9 @@ async def goto_presentation_slide_path(task_id: UUID, index: int) -> Presentatio
 
 
 @app.post("/api/presentations/{task_id}/goto", response_model=PresentationSession)
-async def goto_presentation_slide(task_id: UUID, request: PresentationGotoRequest) -> PresentationSession:
+async def goto_presentation_slide(
+    task_id: UUID, request: PresentationGotoRequest
+) -> PresentationSession:
     try:
         return await runtime.navigate_presentation(task_id, "goto", index=request.index)
     except Exception as exc:
@@ -366,6 +373,16 @@ async def goto_presentation_slide(task_id: UUID, request: PresentationGotoReques
 @app.post("/api/emergency-stop", response_model=RuntimeSnapshot)
 async def emergency_stop() -> RuntimeSnapshot:
     return await runtime.emergency_stop()
+
+
+@app.post("/api/rehearsals/confirm", response_model=RehearsalEvidence)
+async def confirm_rehearsal(
+    request: RehearsalConfirmationRequest,
+) -> RehearsalEvidence:
+    try:
+        return await runtime.record_rehearsal_confirmation(request)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/artifacts/{artifact_path:path}")

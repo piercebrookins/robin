@@ -196,6 +196,14 @@ the correct shared surface, audible narration, grounded output, a live Q&A or re
 leave, restored browser/audio state, and persisted audit evidence. Speaker names remain best-effort
 unless Meet caption metadata is available. Do not describe Robin as complete until those gates pass.
 
+After a rehearsal, leave the Meet normally. The dashboard then displays **Second-participant
+rehearsal proof** for the completed task. The participant who watched from the other device/account
+must enter their name and affirm every visible/audible outcome. Robin combines that confirmation
+with its own transcription, BlackHole route, validation, presentation/narration, interaction,
+leave, and restoration records. Evidence is retained across clean starts under
+`RobinWorkspace/rehearsals/`; repeated runtime instances or duplicate task requests cannot advance
+the consecutive-pass count.
+
 ## Native Bridge Mode
 
 ```bash

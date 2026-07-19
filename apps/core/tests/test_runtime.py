@@ -20,6 +20,7 @@ from robin_core.runtime import RobinRuntime
 from robin_core.schemas import (
     MeetingState,
     PresentationSession,
+    RehearsalConfirmationRequest,
     RobinTask,
     RuntimeState,
     TaskOutcomeState,
@@ -79,6 +80,67 @@ async def test_emergency_stop_halts_all_work_speech_capture_and_presentation(
         item for item in reversed(runtime.recent_events()) if item.type == "runtime.emergency_stop"
     )
     assert event.payload["cleanup_errors"] == []
+
+
+@pytest.mark.asyncio
+async def test_real_rehearsal_evidence_requires_automated_and_participant_proof(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source = workspace / "source-data"
+    source.mkdir(parents=True)
+    (source / "finance.csv").write_text(
+        "year,quarter,scenario,revenue,expenses,operating_income\n"
+        "2024,Q1,actual,100,70,30\n"
+        "2024,Q2,actual,120,80,40\n"
+    )
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+        )
+    )
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    await runtime.ingest_transcript(
+        "Robin, compare the quarterly finance results and make slides.",
+        "Avery",
+        source="audio_stt",
+    )
+    task = runtime.tasks[-1]
+    await runtime._task_handles[task.id]
+    await runtime.ingest_transcript(
+        "Robin, what sources did you use?",
+        "Avery",
+        source="audio_stt",
+    )
+    await runtime.present_task(task.id)
+    for speech in runtime.speech:
+        speech.playback_device = "BlackHole 2ch"
+    await runtime.leave_meeting()
+    confirmation = RehearsalConfirmationRequest(
+        task_id=task.id,
+        participant_name="Avery",
+        robin_heard_participant=True,
+        correct_understanding=True,
+        grounded_output=True,
+        correct_shared_surface=True,
+        audible_narration=True,
+        live_qa_or_revision=True,
+        graceful_leave=True,
+        notes="Verified from the second participant device.",
+    )
+
+    first = await runtime.record_rehearsal_confirmation(confirmation)
+
+    assert first.passed is True
+    assert first.consecutive_passes == 1
+    assert all(first.automated_checks.values())
+    assert (workspace / first.evidence_path).is_file()
+    second = await runtime.record_rehearsal_confirmation(confirmation)
+    assert second.passed is False
+    assert second.consecutive_passes == 0
+    assert second.automated_checks["fresh_runtime"] is False
+    assert second.automated_checks["different_task"] is False
 
 
 @pytest.mark.asyncio
