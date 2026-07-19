@@ -118,6 +118,20 @@ async def test_addressed_voice_check_gets_an_audible_reply_without_creating_task
     assert any(event.type == "conversation.addressed" for event in runtime.recent_events())
 
 
+def test_slide_narration_is_bounded_for_meeting_delivery(tmp_path: Path) -> None:
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=tmp_path / "workspace"),
+            database=DatabaseConfig(path=tmp_path / "workspace" / "robin.db"),
+        )
+    )
+
+    narration = runtime._spoken_excerpt("A complete sentence. " + "detail " * 100)
+
+    assert len(narration) <= 260
+    assert narration == "A complete sentence."
+
+
 @pytest.mark.asyncio
 async def test_task_work_starts_without_waiting_for_acknowledgement(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"

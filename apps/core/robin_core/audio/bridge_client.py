@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -120,10 +121,24 @@ class ProcessBridgeClient(BridgeClient):
         return await self._send("audio.capture.stop", {})
 
     async def play_audio(self, path: Path) -> BridgeResponse:
+        duration = self._wav_duration(path)
         return await self._send(
             "audio.output.play",
             {"path": str(path), "output_device": self.output_device_name},
+            timeout_seconds=max(15, duration + 8) if duration is not None else 60,
         )
+
+    @staticmethod
+    def _wav_duration(path: Path) -> float | None:
+        if not path.exists() or path.suffix.lower() != ".wav":
+            return None
+        try:
+            with wave.open(str(path), "rb") as audio:
+                if audio.getframerate() <= 0:
+                    return None
+                return audio.getnframes() / audio.getframerate()
+        except (EOFError, wave.Error):
+            return None
 
     async def screen_capture(self, application: str) -> BridgeResponse:
         return await self._send("screen.capture", {"application": application})

@@ -805,9 +805,11 @@ class RobinRuntime:
         if slide.type == "title":
             return f"I’ll walk through {deck.title}. {slide.body[0] if slide.body else ''}".strip()
         if slide.type == "executive_summary":
-            return " ".join(slide.body[:2])
+            return self._spoken_excerpt(" ".join(slide.body[:2]))
         if slide.type == "chart":
-            return f"This chart shows {slide.title.lower()}. {slide.body[0] if slide.body else ''}".strip()
+            return self._spoken_excerpt(
+                f"This chart shows {slide.title.lower()}. {slide.body[0] if slide.body else ''}".strip()
+            )
         if slide.type == "key_metrics":
             metrics = list(slide.metrics.items())[:3]
             if metrics:
@@ -816,7 +818,18 @@ class RobinRuntime:
         if slide.type == "sources":
             source_names = ", ".join(source.label for source in deck.sources[:3])
             return f"I used {source_names} and validated the derived figures before presenting."
-        return " ".join(slide.body[:2]) or slide.title
+        return self._spoken_excerpt(" ".join(slide.body[:2]) or slide.title)
+
+    @staticmethod
+    def _spoken_excerpt(text: str, max_chars: int = 260) -> str:
+        compact = " ".join(text.split())
+        if len(compact) <= max_chars:
+            return compact
+        candidate = compact[: max_chars + 1]
+        boundary = max(candidate.rfind(". "), candidate.rfind("; "))
+        if boundary >= 15:
+            return candidate[: boundary + 1]
+        return candidate[: max_chars - 1].rstrip(" ,;:") + "."
 
     async def _handle_intent(self, segment: TranscriptSegment) -> None:
         if await self._handle_pending_confirmation(segment):

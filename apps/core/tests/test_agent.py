@@ -162,3 +162,56 @@ async def test_general_agent_rejects_unapproved_path(tmp_path: Path) -> None:
 
     with pytest.raises(WorkspaceViolation, match="unapproved path"):
         await agent.execute(task, workspace.index())
+
+
+@pytest.mark.asyncio
+async def test_general_agent_requests_revision_for_overlong_slide_copy(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    source = root / "source-data"
+    source.mkdir(parents=True)
+    (source / "notes.txt").write_text("The launch is ready after accessibility review.")
+    settings = Settings(
+        openai_api_key="test-key",
+        model=ModelConfig(agent_max_iterations=4),
+        workspace=WorkspaceConfig(root=root),
+    )
+    workspace = Workspace(settings.workspace)
+    task = RobinTask(
+        meeting_id=uuid4(),
+        title="Launch briefing",
+        request_text="Create a launch briefing.",
+        requested_outcome="Create a launch briefing.",
+    )
+    base = {
+        "title": "Launch briefing",
+        "summary": "Accessibility review is the final gate.",
+        "slides": [
+            {"type": "title", "title": "Launch briefing", "body": ["Readiness review"]},
+            {"type": "findings", "title": "Finding", "body": ["Accessibility remains open."]},
+            {"type": "sources", "title": "Sources", "body": ["notes.txt"]},
+        ],
+        "sources": [
+            {"label": "notes.txt", "path": "source-data/notes.txt", "note": "Launch notes"}
+        ],
+    }
+    too_long = json.loads(json.dumps(base))
+    too_long["slides"][1]["body"] = ["x" * 241]
+    fake = FakeClient(
+        [
+            [function_call("read_workspace_file", "read", {"path": "source-data/notes.txt"})],
+            [function_call("create_deliverable", "draft", too_long)],
+            [function_call("create_deliverable", "revised", base)],
+        ]
+    )
+    agent = GeneralTaskAgent(settings, workspace)
+    agent.client = fake  # type: ignore[assignment]
+    events: list[str] = []
+
+    async def progress(kind: str, _payload: dict) -> None:
+        events.append(kind)
+
+    result = await agent.execute(task, workspace.index(), progress)
+
+    assert result.iterations == 3
+    assert "agent.deliverable.revision_requested" in events
+    assert result.tool_calls[1]["error"].startswith("Slide bullets")

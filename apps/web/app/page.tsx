@@ -342,6 +342,7 @@ function eventMessage(event: EventEnvelope) {
     "agent.started": `Planning with ${String(event.payload.model ?? "the general agent")}`,
     "agent.tool.completed": `Used ${String(event.payload.tool ?? "a workspace tool").replaceAll("_", " ")}`,
     "agent.deliverable.created": `Built a grounded deliverable from ${String(event.payload.source_count ?? "the selected")} source(s)`,
+    "agent.deliverable.revision_requested": "Asked the agent to tighten or correct its draft",
     "task.validating": "Validating the result",
     "task.completed": "Verified work and slides are ready",
     "task.failed": "Task failed",
