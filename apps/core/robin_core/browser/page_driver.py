@@ -109,6 +109,8 @@ class SimulatedPageDriver:
         if key == "join_button":
             self.visible_keys.add("joined_signal")
             self.visible_keys.add("leave_button")
+            self.visible_keys.add("present_button")
+            self.visible_keys.add("enable_captions_button")
         if key in {"prejoin_mute_button", "prejoin_camera_button"}:
             self.visible_keys.discard(key)
         if key == "present_button":
@@ -235,6 +237,7 @@ class SimulatedPageDriver:
             "stop_presenting_button": r"^(?:Stop presenting|Stop sharing)$",
             "presenting_signal": r"^(?:Stop presenting|Stop sharing)$",
             "joined_signal": "Leave call|Leave meeting",
+            "in_call_signal": "Present now|Share screen|Present",
             "enable_captions_button": "Turn on captions|Show captions|Enable captions",
             "disable_captions_button": "Turn off captions|Hide captions|Disable captions",
         }.items():

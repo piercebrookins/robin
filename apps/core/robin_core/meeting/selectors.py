@@ -66,12 +66,24 @@ MEET_SELECTORS: dict[str, list[SelectorCandidate]] = {
         SelectorCandidate(role="button", name_regex=r"Leave call|Leave meeting"),
         SelectorCandidate(test_id="joined-signal"),
     ],
+    "in_call_signal": [
+        SelectorCandidate(role="button", name_regex=r"Present now|Share screen|Present"),
+        SelectorCandidate(
+            role="button",
+            name_regex=r"Turn on captions|Show captions|Enable captions|Turn off captions|Hide captions|Disable captions",
+        ),
+        SelectorCandidate(test_id="in-call-signal"),
+    ],
     "enable_captions_button": [
-        SelectorCandidate(role="button", name_regex=r"Turn on captions|Show captions|Enable captions"),
+        SelectorCandidate(
+            role="button", name_regex=r"Turn on captions|Show captions|Enable captions"
+        ),
         SelectorCandidate(test_id="enable-captions-button"),
     ],
     "disable_captions_button": [
-        SelectorCandidate(role="button", name_regex=r"Turn off captions|Hide captions|Disable captions"),
+        SelectorCandidate(
+            role="button", name_regex=r"Turn off captions|Hide captions|Disable captions"
+        ),
         SelectorCandidate(test_id="disable-captions-button"),
     ],
 }

@@ -97,6 +97,7 @@ async def test_google_meet_join_recovers_an_existing_joined_tab() -> None:
     page.visible_keys.discard("join_button")
     page.visible_keys.add("leave_button")
     page.visible_keys.add("mute_button")
+    page.visible_keys.add("present_button")
 
     await adapter.join()
 
@@ -129,6 +130,20 @@ async def test_google_meet_waiting_room_leave_button_is_not_admission() -> None:
         await adapter.join()
 
     assert adapter.state != MeetingState.LISTENING
+
+
+@pytest.mark.asyncio
+async def test_google_meet_waiting_room_transient_blank_text_is_not_admission() -> None:
+    config = BrowserConfig(automation_mode="simulator")
+    adapter = GoogleMeetAdapter(BrowserController(config), config)
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    page = adapter.meet_page
+    assert isinstance(page, SimulatedPageDriver)
+    page.visible_keys.discard("join_button")
+    page.visible_keys.add("leave_button")
+    page.visible_keys.add("mute_button")
+
+    assert await adapter._is_admitted() is False
 
 
 @pytest.mark.asyncio

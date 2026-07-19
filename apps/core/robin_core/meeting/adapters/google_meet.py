@@ -85,9 +85,13 @@ class GoogleMeetAdapter:
     async def _turn_off_prejoin_media(self) -> None:
         page = self._page()
         if await page.is_visible(MEET_SELECTORS["prejoin_mute_button"], 1_000):
-            await self._click_with_recovery("prejoin_mute_button", MEET_SELECTORS["prejoin_mute_button"], 3_000)
+            await self._click_with_recovery(
+                "prejoin_mute_button", MEET_SELECTORS["prejoin_mute_button"], 3_000
+            )
         if await page.is_visible(MEET_SELECTORS["prejoin_camera_button"], 1_000):
-            await self._click_with_recovery("prejoin_camera_button", MEET_SELECTORS["prejoin_camera_button"], 3_000)
+            await self._click_with_recovery(
+                "prejoin_camera_button", MEET_SELECTORS["prejoin_camera_button"], 3_000
+            )
         self.muted = True
         self.camera_enabled = False
 
@@ -139,9 +143,7 @@ class GoogleMeetAdapter:
                 continue
             last_text = " ".join(snapshot.text.casefold().split())
             if self._admission_rejected(last_text):
-                raise PermissionError(
-                    "Google Meet rejected admission: " + snapshot.text[:300]
-                )
+                raise PermissionError("Google Meet rejected admission: " + snapshot.text[:300])
             if self._admission_pending(last_text):
                 pending_seen = True
             elif await self._is_admitted():
@@ -167,9 +169,7 @@ class GoogleMeetAdapter:
             page=self._page(),
             screenshot_path=screenshot_path,
         )
-        raise TimeoutError(
-            "Robin was not admitted to the meeting before the timeout." + detail
-        )
+        raise TimeoutError("Robin was not admitted to the meeting before the timeout." + detail)
 
     async def _is_admitted(self) -> bool:
         page = self._page()
@@ -178,10 +178,11 @@ class GoogleMeetAdapter:
         if self._admission_pending(text) or self._admission_rejected(text):
             return False
         joined = await page.is_visible(MEET_SELECTORS["joined_signal"], 500)
-        own_microphone = await page.is_visible(MEET_SELECTORS["mute_button"], 250) or await page.is_visible(
-            MEET_SELECTORS["unmute_button"], 250
-        )
-        return joined and own_microphone
+        own_microphone = await page.is_visible(
+            MEET_SELECTORS["mute_button"], 250
+        ) or await page.is_visible(MEET_SELECTORS["unmute_button"], 250)
+        in_call_control = await page.is_visible(MEET_SELECTORS["in_call_signal"], 500)
+        return joined and own_microphone and in_call_control
 
     @staticmethod
     def _admission_pending(text: str) -> bool:
@@ -224,12 +225,8 @@ class GoogleMeetAdapter:
     async def mute(self) -> None:
         if self.meet_page:
             if await self.meet_page.is_visible(MEET_SELECTORS["mute_button"], 750):
-                await self._click_with_recovery(
-                    "mute_button", MEET_SELECTORS["mute_button"], 3_000
-                )
-            elif not await self.meet_page.is_visible(
-                MEET_SELECTORS["unmute_button"], 750
-            ):
+                await self._click_with_recovery("mute_button", MEET_SELECTORS["mute_button"], 3_000)
+            elif not await self.meet_page.is_visible(MEET_SELECTORS["unmute_button"], 750):
                 raise RuntimeError("Meet microphone control is unavailable; could not mute Robin.")
         self.muted = True
 
