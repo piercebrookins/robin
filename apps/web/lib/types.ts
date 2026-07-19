@@ -12,6 +12,17 @@ export type TranscriptSegment = {
   created_at: string;
 };
 
+export type MeetingMemoryItem = {
+  id: string;
+  kind: "topic" | "reference" | "decision" | "objection" | "question" | "commitment" | "correction";
+  text: string;
+  speaker_name: string | null;
+  owner: string | null;
+  deadline: string | null;
+  status: "active" | "resolved" | "superseded" | "cancelled";
+  source_segment_ids: string[];
+};
+
 export type RobinTask = {
   id: string;
   title: string;
@@ -99,6 +110,7 @@ export type RuntimeSnapshot = {
   calendar_auto_join_running: boolean;
   health: HealthItem[];
   transcript: TranscriptSegment[];
+  meeting_memory: MeetingMemoryItem[];
   tasks: RobinTask[];
   artifacts: Artifact[];
   speech: SpeechRecord[];

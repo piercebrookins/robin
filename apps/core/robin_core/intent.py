@@ -8,7 +8,7 @@ from uuid import UUID
 from openai import AsyncOpenAI
 
 from .config import Settings
-from .schemas import MeetingIntent, RobinTask, TranscriptSegment
+from .schemas import MeetingIntent, MeetingMemoryItem, RobinTask, TranscriptSegment
 
 
 class IntentClassifier:
@@ -102,6 +102,7 @@ class IntentClassifier:
         text: str,
         active_tasks: list[RobinTask],
         meeting_context: list[TranscriptSegment] | None = None,
+        memory_context: list[MeetingMemoryItem] | None = None,
     ) -> str:
         lowered = text.casefold()
         if any(
@@ -138,6 +139,20 @@ class IntentClassifier:
                                                 "text": segment.text,
                                             }
                                             for segment in (meeting_context or [])[-20:]
+                                        ],
+                                        "durable_meeting_memory": [
+                                            {
+                                                "kind": item.kind,
+                                                "text": item.text,
+                                                "owner": item.owner,
+                                                "deadline": item.deadline,
+                                                "status": item.status,
+                                                "source_segment_ids": [
+                                                    str(value)
+                                                    for value in item.source_segment_ids
+                                                ],
+                                            }
+                                            for item in (memory_context or [])[-40:]
                                         ],
                                     }
                                 ),

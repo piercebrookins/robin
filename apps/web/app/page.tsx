@@ -283,6 +283,19 @@ export default function Dashboard() {
               ))}
             </div>
           </div>
+          <div className="memory-block">
+            <h3>What Robin believes</h3>
+            <div className="memory-list">
+              {state?.meeting_memory.length === 0 && <span className="muted">No durable decisions or follow-ups yet.</span>}
+              {state?.meeting_memory.slice().reverse().slice(0, 8).map((item) => (
+                <div key={item.id}>
+                  <span>{item.kind} · {item.status}</span>
+                  <p>{item.text}</p>
+                  {(item.owner || item.deadline) && <small>{item.owner ? `Owner: ${item.owner}` : ""}{item.owner && item.deadline ? " · " : ""}{item.deadline ? `Due: ${item.deadline}` : ""}</small>}
+                </div>
+              ))}
+            </div>
+          </div>
         </aside>
       </div>
 
@@ -393,6 +406,7 @@ function eventMessage(event: EventEnvelope) {
     "browser.operator.tool": `Browser tool: ${String(event.payload.tool ?? "action").replaceAll("_", " ")}`,
     "browser.operator.awaiting_confirmation": "Browser action is awaiting confirmation",
     "browser.operator.completed": "Browser task verified",
+    "memory.updated": `Updated durable meeting memory (${String((event.payload.added as unknown[] | undefined)?.length ?? 0)} new)`,
     "audio.transcript.partial": `Hearing: ${String(event.payload.text ?? "speech")}`,
     "audio.transcript.echo_suppressed": "Ignored Robin's echoed speech",
     "audio.realtime.fallback": "Realtime unavailable; switched to bounded transcription",

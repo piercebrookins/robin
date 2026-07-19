@@ -20,6 +20,7 @@ from .intent import IntentClassifier
 from .browser.controller import BrowserController
 from .browser.operator_agent import BrowserOperatorResult, ControlledBrowserAgent
 from .meeting.adapters.google_meet import GoogleMeetAdapter
+from .memory import MeetingMemoryManager
 from .persistence import Store
 from .schemas import (
     Artifact,
@@ -28,6 +29,7 @@ from .schemas import (
     FileIndexRecord,
     HealthItem,
     MeetingIntent,
+    MeetingMemoryItem,
     MeetingState,
     CalendarSnapshot,
     RobinTask,
@@ -51,6 +53,7 @@ class RobinRuntime:
         self.workspace = Workspace(self.settings.workspace)
         self.store = Store(self.settings.database.path)
         self.intent = IntentClassifier(self.settings)
+        self.memory_manager = MeetingMemoryManager(self.settings)
         self.artifacts_worker = ArtifactWorker(self.workspace, self.settings.presentation.base_url)
         self.browser = BrowserController(self.settings.browser)
         self.task_agent = GeneralTaskAgent(self.settings, self.workspace)
@@ -66,6 +69,9 @@ class RobinRuntime:
         self.meeting_url: str | None = None
         self.meeting_id = uuid4()
         self.transcript: list[TranscriptSegment] = self.store.list("transcript", TranscriptSegment)
+        self.meeting_memory: list[MeetingMemoryItem] = self.store.list(
+            "meeting_memory", MeetingMemoryItem
+        )
         self.tasks: list[RobinTask] = self.store.list("task", RobinTask)
         self.artifacts: list[Artifact] = self.store.list("artifact", Artifact)
         self.files: list[FileIndexRecord] = self.store.list("file", FileIndexRecord)
@@ -81,6 +87,7 @@ class RobinRuntime:
         self._speech_lock = asyncio.Lock()
         self._capture_lock = asyncio.Lock()
         self._speech_handles: set[asyncio.Task] = set()
+        self._memory_handles: set[asyncio.Task] = set()
         self._last_spoken_at_ms = 0
         self._calendar_handle: asyncio.Task | None = None
         self._calendar_joined_event_ids: set[str] = set()
@@ -106,6 +113,9 @@ class RobinRuntime:
             calendar_auto_join_running=self._calendar_handle is not None and not self._calendar_handle.done(),
             health=self.health,
             transcript=self.transcript[-100:],
+            meeting_memory=[
+                item for item in self.meeting_memory if item.meeting_id == self.meeting_id
+            ][-100:],
             tasks=sorted(self.tasks, key=lambda task: task.created_at),
             artifacts=sorted(self.artifacts, key=lambda artifact: artifact.created_at),
             speech=sorted(self.speech, key=lambda item: item.started_at)[-25:],
@@ -335,6 +345,11 @@ class RobinRuntime:
         self.runtime_state = RuntimeState.STOPPING
         for handle in self._task_handles.values():
             handle.cancel()
+        for handle in list(self._memory_handles):
+            handle.cancel()
+        if self._memory_handles:
+            await asyncio.gather(*self._memory_handles, return_exceptions=True)
+            self._memory_handles.clear()
         if self._calendar_handle and not self._calendar_handle.done():
             self._calendar_handle.cancel()
             with suppress(asyncio.CancelledError):
@@ -374,6 +389,7 @@ class RobinRuntime:
         )
         self.transcript.append(segment)
         self.store.upsert("transcript", segment)
+        self._schedule_memory_update(segment)
         await self.emit_event(
             "transcript.final",
             {"text": segment.text, "speaker_name": segment.speaker_name, "source": segment.source},
@@ -381,6 +397,40 @@ class RobinRuntime:
         )
         await self._handle_intent(segment)
         return await self.publish()
+
+    def _schedule_memory_update(self, segment: TranscriptSegment) -> None:
+        handle = asyncio.create_task(self._update_meeting_memory(segment))
+        self._memory_handles.add(handle)
+        handle.add_done_callback(self._memory_handles.discard)
+
+    async def _update_meeting_memory(self, segment: TranscriptSegment) -> None:
+        try:
+            current = [
+                item for item in self.meeting_memory if item.meeting_id == segment.meeting_id
+            ]
+            additions, resolve_ids = await self.memory_manager.extract(segment, current)
+            before = {item.id: item.status for item in self.meeting_memory}
+            MeetingMemoryManager.merge(self.meeting_memory, additions, resolve_ids)
+            for item in self.meeting_memory:
+                if item.id not in before or before[item.id] != item.status:
+                    self.store.upsert("meeting_memory", item)
+            if additions or resolve_ids:
+                await self.emit_event(
+                    "memory.updated",
+                    {
+                        "added": [item.model_dump(mode="json") for item in additions],
+                        "resolved_ids": resolve_ids,
+                    },
+                    component="meeting_memory",
+                )
+                await self.publish()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self.emit_event(
+                "memory.update.failed", {"error": str(exc)}, component="meeting_memory"
+            )
+            await self.publish()
 
     async def transcribe_audio_file(self, relative_path: str, speaker_name: str | None = None) -> RuntimeSnapshot:
         path = self.workspace.resolve(relative_path)
@@ -1080,6 +1130,7 @@ class RobinRuntime:
                     segment.text,
                     self._active_tasks(),
                     self._meeting_context(),
+                    self._memory_context(),
                 )
             )
         elif intent.should_ask_confirmation and intent.clarification_question:
@@ -1258,6 +1309,7 @@ class RobinRuntime:
                         task,
                         records,
                         meeting_context=self._meeting_context(task.meeting_id),
+                        memory_context=self._memory_context(task.meeting_id),
                         progress=report_agent_progress,
                     )
                     artifacts, _deck, validation = await asyncio.to_thread(
@@ -1316,6 +1368,10 @@ class RobinRuntime:
     def _meeting_context(self, meeting_id: UUID | None = None) -> list[TranscriptSegment]:
         target = meeting_id or self.meeting_id
         return [segment for segment in self.transcript if segment.meeting_id == target][-30:]
+
+    def _memory_context(self, meeting_id: UUID | None = None) -> list[MeetingMemoryItem]:
+        target = meeting_id or self.meeting_id
+        return [item for item in self.meeting_memory if item.meeting_id == target][-60:]
 
     def _schedule_acknowledgement(self, text: str) -> None:
         handle = asyncio.create_task(self._safe_acknowledge(text))

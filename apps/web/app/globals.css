@@ -99,6 +99,12 @@ p { color: var(--muted); line-height: 1.5; }
 .transcript-list { max-height: 290px; overflow: auto; display: grid; gap: 10px; }
 .transcript-list strong { font-size: .74rem; color: var(--accent); }
 .transcript-list p { margin: 2px 0 0; color: var(--ink); font-size: .84rem; }
+.memory-block { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 16px; }
+.memory-list { max-height: 310px; overflow: auto; display: grid; gap: 10px; }
+.memory-list > div { border-left: 2px solid #afd5c7; padding-left: 9px; }
+.memory-list span { color: var(--accent); font-size: .68rem; font-weight: 700; text-transform: uppercase; }
+.memory-list p { margin: 2px 0; color: var(--ink); font-size: .8rem; }
+.memory-list small { color: var(--muted); font-size: .7rem; }
 
 .system-details { margin-top: 14px; }
 .system-details summary { cursor: pointer; font-weight: 700; }

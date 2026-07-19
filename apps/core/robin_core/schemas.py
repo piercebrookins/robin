@@ -72,6 +72,28 @@ class TranscriptSegment(BaseModel):
     created_at: datetime = Field(default_factory=now_utc)
 
 
+class MeetingMemoryItem(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    meeting_id: UUID
+    kind: Literal[
+        "topic",
+        "reference",
+        "decision",
+        "objection",
+        "question",
+        "commitment",
+        "correction",
+    ]
+    text: str
+    speaker_name: str | None = None
+    owner: str | None = None
+    deadline: str | None = None
+    status: Literal["active", "resolved", "superseded", "cancelled"] = "active"
+    source_segment_ids: list[UUID] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
+
+
 class MeetingIntent(BaseModel):
     classification: Literal[
         "non_task",
@@ -318,6 +340,7 @@ class RuntimeSnapshot(BaseModel):
     calendar_auto_join_running: bool = False
     health: list[HealthItem]
     transcript: list[TranscriptSegment]
+    meeting_memory: list[MeetingMemoryItem] = Field(default_factory=list)
     tasks: list[RobinTask]
     artifacts: list[Artifact]
     speech: list[SpeechRecord] = Field(default_factory=list)

@@ -13,6 +13,7 @@ from .schemas import (
     AgentDeliverable,
     AgentExecutionResult,
     FileIndexRecord,
+    MeetingMemoryItem,
     RobinTask,
     TranscriptSegment,
 )
@@ -41,6 +42,7 @@ class GeneralTaskAgent:
         task: RobinTask,
         records: list[FileIndexRecord],
         meeting_context: list[TranscriptSegment] | None = None,
+        memory_context: list[MeetingMemoryItem] | None = None,
         progress: ProgressCallback | None = None,
     ) -> AgentExecutionResult:
         if not self.client:
@@ -62,6 +64,21 @@ class GeneralTaskAgent:
                                 "text": segment.text,
                             }
                             for segment in (meeting_context or [])[-30:]
+                        ],
+                        "durable_meeting_memory": [
+                            {
+                                "id": str(item.id),
+                                "kind": item.kind,
+                                "text": item.text,
+                                "speaker": item.speaker_name,
+                                "owner": item.owner,
+                                "deadline": item.deadline,
+                                "status": item.status,
+                                "source_segment_ids": [
+                                    str(segment_id) for segment_id in item.source_segment_ids
+                                ],
+                            }
+                            for item in (memory_context or [])[-60:]
                         ],
                         "workspace_files": [
                             {
