@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import resource
+import sys
 import time
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -44,6 +46,7 @@ from .workspace import Workspace
 class RobinRuntime:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or load_settings()
+        self._started_monotonic = time.monotonic()
         self.workspace = Workspace(self.settings.workspace)
         self.store = Store(self.settings.database.path)
         self.intent = IntentClassifier(self.settings)
@@ -1447,6 +1450,13 @@ class RobinRuntime:
 
     def metrics(self) -> RuntimeMetrics:
         events = self.recent_events(500)
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        rss_bytes = usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
+        workspace_bytes = sum(
+            path.stat().st_size
+            for path in self.workspace.root.rglob("*")
+            if path.is_file()
+        )
         active_statuses = {
             TaskStatus.AWAITING_CLARIFICATION,
             TaskStatus.ACCEPTED,
@@ -1468,6 +1478,19 @@ class RobinRuntime:
             presentation_count=len(self.presentations),
             audio_capture_event_count=sum(1 for event in events if event.type.startswith("audio.capture")),
             direct_request_count=sum(1 for event in events if event.type == "task.created"),
+            agent_tool_call_count=sum(
+                1 for event in events if event.type == "agent.tool.completed"
+            ),
+            recovery_event_count=sum(
+                1 for event in events if ".recovery." in event.type
+            ),
+            realtime_failure_count=sum(
+                1 for event in events if event.type == "audio.realtime.failed"
+            ),
+            uptime_seconds=round(time.monotonic() - self._started_monotonic, 1),
+            process_cpu_seconds=round(usage.ru_utime + usage.ru_stime, 2),
+            peak_rss_mb=round(rss_bytes / 1024 / 1024, 1),
+            workspace_disk_mb=round(workspace_bytes / 1024 / 1024, 1),
         )
 
     def _write_trace(self, event: EventEnvelope) -> None:

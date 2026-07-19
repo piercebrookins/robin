@@ -66,6 +66,11 @@ async def test_demo_task_generates_deck(tmp_path: Path) -> None:
     assert metrics.task_count >= 1
     assert metrics.artifact_count >= 3
     assert metrics.speech_count >= 1
+    assert metrics.uptime_seconds >= 0
+    assert metrics.process_cpu_seconds > 0
+    assert metrics.peak_rss_mb > 0
+    assert metrics.workspace_disk_mb > 0
+    assert metrics.agent_tool_call_count >= 0
     assert any(event.type == "task.completed" for event in runtime.recent_events())
     assert (workspace / "sessions" / "traces" / f"{task.id}.jsonl").exists()
 

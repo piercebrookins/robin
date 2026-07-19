@@ -104,6 +104,11 @@ p { color: var(--muted); line-height: 1.5; }
 .system-details summary { cursor: pointer; font-weight: 700; }
 .details-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 20px; }
 .audio-checks { border-top: 1px solid var(--line); padding-top: 18px; grid-column: 1 / -1; }
+.resource-panel { border-top: 1px solid var(--line); padding-top: 18px; grid-column: 1 / -1; }
+.metric-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.metric-list > div { border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: grid; }
+.metric-list span { color: var(--muted); font-size: .7rem; }
+.metric-list strong { font-size: .9rem; }
 .audio-check-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .audio-test-result { margin: 12px 0 0; font-size: .8rem; }
 .check-list { display: grid; gap: 9px; }
@@ -136,6 +141,7 @@ p { color: var(--muted); line-height: 1.5; }
   .join-row input { flex-basis: 100%; }
   .join-row button { flex: 1; }
   .now-strip { align-items: flex-start; flex-wrap: wrap; }
+  .metric-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .state-chips { margin-left: 50px; justify-content: flex-start; }
 }
 

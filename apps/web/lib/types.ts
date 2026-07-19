@@ -85,6 +85,7 @@ export type SpeechRecord = {
   started_at: string;
   completed_at: string | null;
   error: string | null;
+  interrupted: boolean;
 };
 
 export type RuntimeSnapshot = {
@@ -126,6 +127,13 @@ export type RuntimeMetrics = {
   presentation_count: number;
   audio_capture_event_count: number;
   direct_request_count: number;
+  agent_tool_call_count: number;
+  recovery_event_count: number;
+  realtime_failure_count: number;
+  uptime_seconds: number;
+  process_cpu_seconds: number;
+  peak_rss_mb: number;
+  workspace_disk_mb: number;
 };
 
 export type PreflightSnapshot = {

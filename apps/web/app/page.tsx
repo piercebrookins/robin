@@ -18,8 +18,8 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
-import { CORE_URL, CORE_WS_URL, getPreflight, getState, postJson } from "../lib/api";
-import type { Artifact, EventEnvelope, PreflightSnapshot, RuntimeSnapshot } from "../lib/types";
+import { CORE_URL, CORE_WS_URL, getMetrics, getPreflight, getState, postJson } from "../lib/api";
+import type { Artifact, EventEnvelope, PreflightSnapshot, RuntimeMetrics, RuntimeSnapshot } from "../lib/types";
 
 const ACTIVE_TASKS = ["AWAITING_CLARIFICATION", "ACCEPTED", "QUEUED", "EXECUTING", "VALIDATING", "READY_TO_PRESENT", "PRESENTING"];
 const ACTIVE_MEETING = ["NAVIGATING", "PREJOIN", "REQUESTING_ADMISSION", "JOINED", "LISTENING", "SPEAKING", "PRESENTING"];
@@ -34,6 +34,7 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [preflight, setPreflight] = useState<PreflightSnapshot | null>(null);
   const [audioTestMessage, setAudioTestMessage] = useState<string | null>(null);
+  const [metrics, setMetrics] = useState<RuntimeMetrics | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -75,6 +76,13 @@ export default function Dashboard() {
       stateSocket?.close();
       eventSocket?.close();
     };
+  }, []);
+
+  useEffect(() => {
+    const refresh = () => getMetrics().then(setMetrics).catch(() => undefined);
+    refresh();
+    const timer = window.setInterval(refresh, 2500);
+    return () => window.clearInterval(timer);
   }, []);
 
   const activeTask = useMemo(
@@ -290,6 +298,18 @@ export default function Dashboard() {
             </div>
             {audioTestMessage && <p className="audio-test-result" aria-live="polite">{audioTestMessage}</p>}
           </section>
+          <section className="resource-panel">
+            <h2>Resource use</h2>
+            <p className="muted">Live process and workspace budgets.</p>
+            <div className="metric-list">
+              <Metric label="Peak memory" value={`${metrics?.peak_rss_mb ?? 0} MB`} />
+              <Metric label="CPU time" value={`${metrics?.process_cpu_seconds ?? 0} sec`} />
+              <Metric label="Workspace" value={`${metrics?.workspace_disk_mb ?? 0} MB`} />
+              <Metric label="Agent tools" value={String(metrics?.agent_tool_call_count ?? 0)} />
+              <Metric label="Recoveries" value={String(metrics?.recovery_event_count ?? 0)} />
+              <Metric label="Realtime failures" value={String(metrics?.realtime_failure_count ?? 0)} />
+            </div>
+          </section>
         </div>
       </details>
     </main>
@@ -302,6 +322,10 @@ function StatusChip({ ok, label, neutral = false }: { ok: boolean; label: string
 
 function CheckRow({ ok, name, detail }: { ok: boolean; name: string; detail: string }) {
   return <div className="check-row">{ok ? <CheckCircle2 className="ok" size={17} /> : <XCircle className="bad" size={17} />}<div><strong>{name.replaceAll("_", " ")}</strong><span>{detail}</span></div></div>;
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return <div><span>{label}</span><strong>{value}</strong></div>;
 }
 
 function describeCurrentAction(state: RuntimeSnapshot | null, taskTitle?: string, taskStatus?: string) {

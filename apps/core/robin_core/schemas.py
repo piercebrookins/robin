@@ -298,6 +298,13 @@ class RuntimeMetrics(BaseModel):
     presentation_count: int = 0
     audio_capture_event_count: int = 0
     direct_request_count: int = 0
+    agent_tool_call_count: int = 0
+    recovery_event_count: int = 0
+    realtime_failure_count: int = 0
+    uptime_seconds: float = 0
+    process_cpu_seconds: float = 0
+    peak_rss_mb: float = 0
+    workspace_disk_mb: float = 0
 
 
 class RuntimeSnapshot(BaseModel):
