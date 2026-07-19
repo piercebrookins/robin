@@ -1,4 +1,4 @@
-.PHONY: robin setup launch-chrome seed seed-demo dev doctor preflight core web test smoke smoke-test smoke-audio smoke-audio-live smoke-audio-realtime smoke-browser-operator smoke-memory smoke-agent smoke-bridge smoke-capture smoke-listen smoke-leave-cleanup smoke-meet-fixture smoke-meet-recovery smoke-share-dialog-fixture smoke-calendar smoke-observability smoke-workspace smoke-retry-present smoke-validation smoke-clarification smoke-queue smoke-dedup smoke-real-meet demo-reset typecheck
+.PHONY: robin setup launch-chrome seed seed-demo dev doctor preflight core web test eval-operator eval-operator-live smoke smoke-test smoke-audio smoke-audio-live smoke-audio-realtime smoke-browser-operator smoke-memory smoke-agent smoke-bridge smoke-capture smoke-listen smoke-leave-cleanup smoke-meet-fixture smoke-meet-recovery smoke-share-dialog-fixture smoke-calendar smoke-observability smoke-workspace smoke-retry-present smoke-validation smoke-clarification smoke-queue smoke-dedup smoke-real-meet demo-reset typecheck
 
 robin:
 	scripts/run_robin.sh
@@ -31,6 +31,12 @@ web:
 test:
 	uv run pytest
 	pnpm --dir apps/web test
+
+eval-operator:
+	uv run python scripts/run_operator_evals.py
+
+eval-operator-live:
+	uv run python scripts/run_operator_evals.py --live-models
 
 smoke:
 	uv run python scripts/smoke_demo.py

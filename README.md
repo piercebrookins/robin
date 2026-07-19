@@ -56,6 +56,8 @@ make dev
 make doctor
 make preflight
 make test
+make eval-operator
+make eval-operator-live
 make core
 make web
 make smoke
@@ -163,6 +165,9 @@ physical microphone is not Chrome output and is therefore not a valid hearing te
 Robin distinguishes automated evidence from real-meeting proof:
 
 - `make test` runs unit, integration, recovery, adversarial, long-context, and safety checks.
+- `make eval-operator` runs the deterministic operator/build matrix and saves a timestamped JSON
+  evidence bundle under `RobinWorkspace/sessions/evidence/`; `make eval-operator-live` adds live API
+  model and realtime-audio checks.
 - `make smoke-agent`, `make smoke-browser-operator`, and `make smoke-memory` exercise live model
   tool use, semantic browser inspection, and sourced memory correction.
 - `make smoke-audio-live` proves BlackHole output and Chrome capture/transcription locally.
