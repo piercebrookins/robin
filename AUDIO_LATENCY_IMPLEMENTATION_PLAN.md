@@ -463,6 +463,15 @@ Implemented on branch `codex/audio-latency` in worktree `/Users/vasu/code/robin-
   - Web: 1 passed.
 - `make smoke-retry-present`: passed.
 - `make smoke-conversation-revision`: passed.
+- `make smoke-audio`: passed.
+  - TTS + BlackHole playback: duration 3.05s, route `pcm_stream`.
+  - Transcription smoke returned the expected Robin smoke phrase.
+- `make smoke-audio-live`: passed after launching Robin Chrome with `make launch-chrome`.
+  - Voice duration: 7.60s.
+  - Route: `pcm_stream`.
+  - Time to first audio: 931ms.
+  - Chrome capture RMS/peak: 0.0564 / 0.6078.
+  - Loopback and captured audio both transcribed the Robin audio check phrase.
 - Focused audio latency suite passed:
   - `apps/core/tests/test_google_meet_adapter.py`
   - `apps/core/tests/test_audio_prefetch.py`
@@ -471,6 +480,5 @@ Implemented on branch `codex/audio-latency` in worktree `/Users/vasu/code/robin-
 
 ### Environment-gated verification
 
-- `make smoke-audio`: not completed in this shell because `OPENAI_API_KEY` is unset while `config/robin.example.yaml` uses `audio.mode=openai`.
-- `make smoke-audio-live`: not completed for the same missing `OPENAI_API_KEY` prerequisite.
-- Three real-Meet rehearsals were not run from this coding environment; they still require a configured OpenAI key, native bridge, BlackHole route, browser profile, and participant-side confirmation.
+- `make smoke-real-meet` was not run because `ROBIN_REAL_MEET_URL` is not set.
+- Three real-Meet rehearsals were not run from this coding environment; they still require a live Google Meet URL and participant-side confirmation that the presentation was visible and every narration segment was audible.
