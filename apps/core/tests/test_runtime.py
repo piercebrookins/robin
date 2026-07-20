@@ -21,18 +21,23 @@ from robin_core.config import (
 )
 from robin_core.runtime import RobinRuntime
 from robin_core.schemas import (
+    Artifact,
     DeckSpec,
     MeetingState,
     MeetingIntent,
     PresentationSession,
     RehearsalConfirmationRequest,
     RobinTask,
+    SlideSpec,
+    SourceCitation,
     RuntimeState,
     SlideSpec,
     SpeechRecord,
     TaskOutcomeState,
     TaskStatus,
     ValidationReport,
+    PresentationHandoffState,
+    now_utc,
 )
 
 
@@ -231,6 +236,233 @@ async def test_demo_task_generates_deck(tmp_path: Path) -> None:
     assert metrics.agent_tool_call_count >= 0
     assert any(event.type == "task.completed" for event in runtime.recent_events())
     assert (workspace / "sessions" / "traces" / f"{task.id}.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_validated_task_raises_hand_and_waits_for_invitation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source = workspace / "source-data"
+    source.mkdir(parents=True)
+    (source / "finance.csv").write_text(
+        "year,quarter,scenario,revenue,expenses,operating_income\n"
+        "2024,Q1,actual,100,70,30\n"
+        "2024,Q2,actual,120,80,40\n"
+        "2024,Q3,actual,150,95,55\n"
+        "2024,Q4,actual,180,110,70\n"
+    )
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+            presentation=PresentationConfig(base_url="http://127.0.0.1:3000/present"),
+        )
+    )
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+
+    await runtime.ingest_transcript("Robin, make a few slides from the finance files.", "Avery")
+    task = runtime.tasks[-1]
+    await runtime._task_handles[task.id]
+    await _wait_for(lambda: runtime.presentation_handoff.state.name == "WAITING_FOR_INVITATION")
+
+    assert task.status == TaskStatus.READY_TO_PRESENT
+    assert task.presentation_ready_at is not None
+    assert runtime.presentation_handoff.task_id == task.id
+    assert runtime.presentation_handoff.hand_raised is True
+    assert runtime.meet.presenting is False
+    assert not any(speech.text == "The analysis and slides are ready." for speech in runtime.speech)
+
+
+@pytest.mark.asyncio
+async def test_invitation_lowers_hand_and_presents_once(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source = workspace / "source-data"
+    source.mkdir(parents=True)
+    (source / "finance.csv").write_text(
+        "year,quarter,scenario,revenue,expenses,operating_income\n"
+        "2024,Q1,actual,100,70,30\n"
+        "2024,Q2,actual,120,80,40\n"
+        "2024,Q3,actual,150,95,55\n"
+        "2024,Q4,actual,180,110,70\n"
+    )
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+            presentation=PresentationConfig(base_url="http://127.0.0.1:3000/present"),
+        )
+    )
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    await runtime.ingest_transcript("Robin, make a few slides from the finance files.", "Avery")
+    task = runtime.tasks[-1]
+    await runtime._task_handles[task.id]
+    await _wait_for(lambda: runtime.presentation_handoff.state.name == "WAITING_FOR_INVITATION")
+
+    await runtime.ingest_transcript("Robin, go ahead and share now.", "Avery")
+
+    assert task.status == TaskStatus.COMPLETED
+    assert runtime.presentation_handoff.state == PresentationHandoffState.IDLE
+    assert runtime.presentation_handoff.hand_raised is False
+    assert runtime.meet.presenting is False
+    events = runtime.recent_events(300)
+    assert sum(1 for event in events if event.type == "presentation.started") == 1
+    assert any(event.type == "presentation.invitation.detected" for event in events)
+    assert any(event.type == "meeting.hand.lowered" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_non_invitation_turn_leaves_hand_raised(tmp_path: Path) -> None:
+    runtime = _runtime_for_handoff_fixture(tmp_path)
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    task = _ready_task_with_deck(runtime, "Ready deck")
+    await runtime.request_presentation_floor(task.id, task.revision)
+
+    await runtime.ingest_transcript("Robin has a deck ready.", "Avery")
+
+    assert task.status == TaskStatus.READY_TO_PRESENT
+    assert runtime.presentation_handoff.state == PresentationHandoffState.WAITING_FOR_INVITATION
+    assert runtime.presentation_handoff.hand_raised is True
+    assert runtime.meet.presenting is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_can_relax_wake_word_for_pending_presentation_invitation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+            presentation=PresentationConfig(
+                base_url="http://127.0.0.1:3000/present",
+                require_wake_word_for_invitation=False,
+            ),
+        )
+    )
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    task = _ready_task_with_deck(runtime, "Ready deck")
+    await runtime.request_presentation_floor(task.id, task.revision)
+
+    await runtime.ingest_transcript("Please make another deck later.", "Avery")
+    assert len(runtime.tasks) == 1
+    assert runtime.presentation_handoff.state == PresentationHandoffState.WAITING_FOR_INVITATION
+
+    await runtime.ingest_transcript("You can share now.", "Avery")
+
+    assert task.status == TaskStatus.COMPLETED
+    assert runtime.presentation_handoff.state == PresentationHandoffState.IDLE
+    assert not any(
+        event.type == "conversation.ignored"
+        and event.payload.get("reason") == "wake_word_missing"
+        for event in runtime.recent_events(100)
+    )
+
+
+@pytest.mark.asyncio
+async def test_second_ready_task_waits_and_raises_after_first_completes(tmp_path: Path) -> None:
+    runtime = _runtime_for_handoff_fixture(tmp_path)
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    first = _ready_task_with_deck(runtime, "First ready deck")
+    second = _ready_task_with_deck(runtime, "Second ready deck")
+    assert first.presentation_ready_at and second.presentation_ready_at
+
+    await runtime.request_presentation_floor(first.id, first.revision)
+    await runtime.request_presentation_floor(second.id, second.revision)
+    assert runtime.presentation_handoff.task_id == first.id
+
+    await runtime.ingest_transcript("Robin, go ahead and share now.", "Avery")
+
+    assert first.status == TaskStatus.COMPLETED
+    assert second.status == TaskStatus.READY_TO_PRESENT
+    assert runtime.presentation_handoff.state == PresentationHandoffState.WAITING_FOR_INVITATION
+    assert runtime.presentation_handoff.task_id == second.id
+    assert runtime.presentation_handoff.hand_raised is True
+
+
+@pytest.mark.asyncio
+async def test_duplicate_invitation_segment_cannot_start_twice(tmp_path: Path) -> None:
+    runtime = _runtime_for_handoff_fixture(tmp_path)
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    task = _ready_task_with_deck(runtime, "Ready deck")
+    await runtime.request_presentation_floor(task.id, task.revision)
+    await runtime.ingest_transcript("Robin, go ahead and share now.", "Avery")
+    invitation_segment = runtime.transcript[-1]
+
+    await runtime.accept_presentation_invitation(
+        invitation_segment,
+        MeetingIntent(
+            classification="presentation_invitation",
+            confidence=1,
+            addressed_to_robin=True,
+            referenced_task_id=task.id,
+        ),
+    )
+
+    assert sum(1 for event in runtime.recent_events(200) if event.type == "presentation.started") == 1
+
+
+@pytest.mark.asyncio
+async def test_task_revision_and_cancellation_clear_pending_handoff(tmp_path: Path) -> None:
+    runtime = _runtime_for_handoff_fixture(tmp_path)
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    revised = _ready_task_with_deck(runtime, "Revised deck")
+    await runtime.request_presentation_floor(revised.id, revised.revision)
+
+    await runtime.ingest_transcript("Robin, add a sources slide.", "Avery")
+
+    assert revised.revision == 2
+    assert revised.presentation_ready_at is None
+    assert runtime.presentation_handoff.state == PresentationHandoffState.IDLE
+
+    cancelled = _ready_task_with_deck(runtime, "Cancelled deck")
+    await runtime.request_presentation_floor(cancelled.id, cancelled.revision)
+
+    await runtime.cancel_task(cancelled.id)
+
+    assert cancelled.status == TaskStatus.CANCELLED
+    assert cancelled.presentation_ready_at is None
+    assert runtime.presentation_handoff.state == PresentationHandoffState.IDLE
+
+
+@pytest.mark.asyncio
+async def test_stale_revision_invitation_is_rejected_without_sharing(tmp_path: Path) -> None:
+    runtime = _runtime_for_handoff_fixture(tmp_path)
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    task = _ready_task_with_deck(runtime, "Ready deck")
+    await runtime.request_presentation_floor(task.id, task.revision)
+    task.revision += 1
+    task.presentation_ready_at = None
+
+    await runtime.ingest_transcript("Robin, go ahead and share now.", "Avery")
+
+    assert task.status == TaskStatus.READY_TO_PRESENT
+    assert runtime.meet.presenting is False
+    assert any(
+        event.type == "presentation.invitation.rejected"
+        and event.payload.get("reason") == "stale_task_or_revision"
+        for event in runtime.recent_events(100)
+    )
+
+
+@pytest.mark.asyncio
+async def test_presentation_start_failure_blocks_without_reraising(tmp_path: Path) -> None:
+    runtime = _runtime_for_handoff_fixture(tmp_path)
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    task = _ready_task_with_deck(runtime, "Ready deck")
+    await runtime.request_presentation_floor(task.id, task.revision)
+
+    async def fail_start(_url: str) -> None:
+        raise RuntimeError("share dialog failed")
+
+    runtime.meet.start_presenting = fail_start  # type: ignore[method-assign]
+
+    await runtime.ingest_transcript("Robin, go ahead and share now.", "Avery")
+
+    assert task.status == TaskStatus.READY_TO_PRESENT
+    assert task.outcome_state == TaskOutcomeState.BLOCKED
+    assert runtime.presentation_handoff.state == PresentationHandoffState.BLOCKED
+    assert runtime.presentation_handoff.error == "share dialog failed"
+    assert runtime.presentation_handoff.hand_raised is False
 
 
 @pytest.mark.asyncio
@@ -936,8 +1168,8 @@ async def test_retry_failed_task_reschedules_work(tmp_path: Path) -> None:
 
     assert task.status == TaskStatus.READY_TO_PRESENT
     assert task.revision == 2
+    assert task.presentation_ready_at is not None
     assert any(event.type == "task.retry" for event in runtime.recent_events())
-    assert any(speech.text == "The analysis and slides are ready." for speech in runtime.speech)
 
 
 @pytest.mark.asyncio
@@ -1376,3 +1608,62 @@ def _write_pdf(path: Path, text: str) -> None:
     page.insert_text((72, 72), text)
     doc.save(path)
     doc.close()
+
+
+def _runtime_for_handoff_fixture(tmp_path: Path) -> RobinRuntime:
+    workspace = tmp_path / "workspace"
+    return RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+            presentation=PresentationConfig(base_url="http://127.0.0.1:3000/present"),
+        )
+    )
+
+
+def _ready_task_with_deck(runtime: RobinRuntime, title: str) -> RobinTask:
+    task = RobinTask(
+        meeting_id=runtime.meeting_id,
+        title=title,
+        status=TaskStatus.READY_TO_PRESENT,
+        request_text=title,
+        requested_outcome=title,
+        outcome_state=TaskOutcomeState.VERIFIED,
+        outcome_detail="Grounding, citations, and artifact validation passed.",
+        presentation_ready_at=now_utc(),
+    )
+    runtime.tasks.append(task)
+    runtime.store.upsert("task", task)
+    deck = DeckSpec(
+        task_id=task.id,
+        revision=task.revision,
+        title=title,
+        slides=[
+            SlideSpec(type="title", title=title, body=["Ready to present."]),
+            SlideSpec(type="sources", title="Sources"),
+        ],
+        sources=[SourceCitation(label="fixture", path="source-data/fixture.csv", note="fixture")],
+    )
+    relative_path = Path("generated") / str(task.id) / f"deck_v{task.revision}.json"
+    path = runtime.workspace.resolve(relative_path.as_posix())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(deck.model_dump_json(), encoding="utf-8")
+    artifact = Artifact(
+        task_id=task.id,
+        revision=task.revision,
+        type="deck_json",
+        path=relative_path.as_posix(),
+        url=f"{runtime.settings.presentation.base_url}/{task.id}?revision={task.revision}",
+    )
+    runtime.artifacts.append(artifact)
+    runtime.store.upsert("artifact", artifact)
+    return task
+
+
+async def _wait_for(predicate, timeout: float = 1.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    assert predicate()

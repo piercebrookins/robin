@@ -91,6 +91,8 @@ presentation:
   default_slide_count: 4
   narration_prefetch_enabled: true
   narration_prefetch_concurrency: 2
+  hand_raise_handoff_enabled: true
+  require_wake_word_for_invitation: true
 
 database:
   path: "./RobinWorkspace/robin.db"

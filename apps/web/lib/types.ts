@@ -33,8 +33,20 @@ export type RobinTask = {
   requested_outcome: string;
   constraints: string[];
   error: string | null;
+  presentation_ready_at: string | null;
   outcome_state: "UNVERIFIED" | "WORKING" | "AWAITING_CONFIRMATION" | "BLOCKED" | "FAILED" | "VERIFIED" | "CANCELLED";
   outcome_detail: string | null;
+};
+
+export type PresentationHandoff = {
+  state: "IDLE" | "RAISING_HAND" | "WAITING_FOR_INVITATION" | "INVITATION_RECEIVED" | "LOWERING_HAND" | "STARTING_PRESENTATION" | "PRESENTING" | "BLOCKED";
+  task_id: string | null;
+  task_revision: number | null;
+  hand_raised: boolean;
+  invited_by: string | null;
+  invitation_segment_id: string | null;
+  updated_at: string;
+  error: string | null;
 };
 
 export type FileIndexRecord = {
@@ -117,6 +129,7 @@ export type RuntimeSnapshot = {
   artifacts: Artifact[];
   speech: SpeechRecord[];
   presentations: PresentationSession[];
+  presentation_handoff: PresentationHandoff;
 };
 
 export type EventEnvelope = {

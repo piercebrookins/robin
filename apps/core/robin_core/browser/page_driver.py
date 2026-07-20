@@ -130,6 +130,16 @@ class SimulatedPageDriver:
             self.visible_keys.add("presenting_signal")
         if key == "stop_presenting_button":
             self.visible_keys.discard("stop_presenting_button")
+        if key == "reactions_button":
+            self.visible_keys.add("raise_hand_button")
+        if key == "raise_hand_button":
+            self.visible_keys.discard("raise_hand_button")
+            self.visible_keys.add("lower_hand_button")
+            self.visible_keys.add("hand_raised_signal")
+        if key == "lower_hand_button":
+            self.visible_keys.discard("lower_hand_button")
+            self.visible_keys.discard("hand_raised_signal")
+            self.visible_keys.add("raise_hand_button")
         if key == "mute_button":
             self.visible_keys.discard("mute_button")
             self.visible_keys.add("unmute_button")
@@ -265,6 +275,10 @@ class SimulatedPageDriver:
             "unmute_button": r"^(?:Turn on microphone|Unmute microphone)(?:\b.*)?$",
             "camera_button": "Turn off camera|Turn on camera|Camera",
             "present_button": "Present now|Share screen|Present",
+            "reactions_button": "Reactions|Activities",
+            "raise_hand_button": "Raise hand",
+            "lower_hand_button": "Lower hand",
+            "hand_raised_signal": "Your hand is raised|You raised your hand",
             "share_tab_option": "A tab|Chrome tab|Share a tab",
             "stop_presenting_button": r"^(?:Stop presenting|Stop sharing)$",
             "presenting_signal": r"^(?:Stop presenting|Stop sharing)$",
@@ -273,7 +287,7 @@ class SimulatedPageDriver:
             "enable_captions_button": "Turn on captions|Show captions|Enable captions",
             "disable_captions_button": "Turn off captions|Hide captions|Disable captions",
         }.items():
-            if any(candidate.name_regex == known for candidate in candidates):
+            if any(candidate.name_regex == known or candidate.text_regex == known for candidate in candidates):
                 return key
         return "unknown"
 

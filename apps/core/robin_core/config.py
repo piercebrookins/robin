@@ -166,6 +166,8 @@ class PresentationConfig(BaseModel):
     default_slide_count: int = 4
     narration_prefetch_enabled: bool = True
     narration_prefetch_concurrency: int = 2
+    hand_raise_handoff_enabled: bool = True
+    require_wake_word_for_invitation: bool = True
 
 
 class DatabaseConfig(BaseModel):
