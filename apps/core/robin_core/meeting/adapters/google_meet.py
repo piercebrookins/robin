@@ -286,23 +286,13 @@ class GoogleMeetAdapter:
 
     async def mute(self) -> None:
         if self.meet_page:
-            if await self.meet_page.is_visible(MEET_SELECTORS["mute_button"], 750):
-                await self._click_with_recovery("mute_button", MEET_SELECTORS["mute_button"], 3_000)
-            elif not await self.meet_page.is_visible(MEET_SELECTORS["unmute_button"], 750):
-                raise RuntimeError("Meet microphone control is unavailable; could not mute Robin.")
+            await self.meet_page.set_microphone_muted(True, 3_000)
         self.muted = True
 
     async def unmute(self) -> None:
         if self.meet_page:
             await self.ensure_microphone_device()
-            if await self.meet_page.is_visible(MEET_SELECTORS["unmute_button"], 750):
-                await self._click_with_recovery(
-                    "unmute_button", MEET_SELECTORS["unmute_button"], 3_000
-                )
-            elif not await self.meet_page.is_visible(MEET_SELECTORS["mute_button"], 750):
-                raise RuntimeError(
-                    "Meet microphone control is unavailable; could not unmute Robin."
-                )
+            await self.meet_page.set_microphone_muted(False, 3_000)
             await asyncio.sleep(max(self.config.microphone_settle_ms, 0) / 1000)
         self.muted = False
 

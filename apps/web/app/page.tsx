@@ -396,7 +396,7 @@ export default function Dashboard() {
             <h2>Manual request</h2>
             <p className="muted">Use only to test task handling without speaking in Meet.</p>
             <textarea value={manualTask} onChange={(event) => setManualTask(event.target.value)} aria-label="Manual task text" />
-            <button className="primary" onClick={() => act("/api/transcript", { speaker_name: "Operator", text: manualTask }, "Sending request")} disabled={busy !== null}>
+            <button className="primary" onClick={() => act("/api/transcript", { speaker_name: "Operator", text: /\brobin\b/i.test(manualTask) ? manualTask : `Robin, ${manualTask}` }, "Sending request")} disabled={busy !== null}>
               <Mic size={16} /> Send request
             </button>
           </section>
@@ -469,7 +469,7 @@ function describeCurrentAction(state: RuntimeSnapshot | null, taskTitle?: string
   if (taskStatus === "EXECUTING") return `working on ${taskTitle ?? "the request"}`;
   if (taskStatus === "VALIDATING") return "checking the finished analysis";
   if (taskStatus === "READY_TO_PRESENT") return "ready to present";
-  if (state.capture_loop_running) return "listening for requests";
+  if (state.capture_loop_running) return 'listening for “Robin”';
   return "ready for a meeting";
 }
 
@@ -484,6 +484,7 @@ function eventMessage(event: EventEnvelope) {
     "audio.listen.started": "Listening started",
     "audio.realtime.starting": "Opening low-latency transcription",
     "audio.speech.detected": "Detected a participant speaking",
+    "audio.barge_in.accepted": "Heard “Robin” and paused to listen",
     "speech.interrupted": "Robin stopped speaking to listen",
     "presentation.narration.interrupted": "Narration paused for participant",
     "browser.operator.started": "Model browser operator started",
@@ -493,6 +494,7 @@ function eventMessage(event: EventEnvelope) {
     "memory.updated": `Updated durable meeting memory (${String((event.payload.added as unknown[] | undefined)?.length ?? 0)} new)`,
     "audio.transcript.partial": `Hearing: ${String(event.payload.text ?? "speech")}`,
     "audio.transcript.echo_suppressed": "Ignored Robin's echoed speech",
+    "conversation.ignored": "Ignored chatter without the “Robin” wake word",
     "audio.realtime.fallback": "Realtime unavailable; switched to bounded transcription",
     "audio.listen.stopped": "Listening stopped",
     "audio.silence.skipped": "Listening—no speech detected",

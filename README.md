@@ -99,6 +99,9 @@ For a real Meet, Robin also selects and verifies BlackHole before joining and be
 utterance. It disables Meet's Studio sound and Adaptive audio processing for the virtual
 microphone so Meet cannot filter or merge the injected speech. A missing or stale device now
 fails the utterance instead of recording a false audio success.
+Robin transcribes meeting context continuously but only acts or answers when a complete turn
+contains the standalone wake word `Robin`. Raw sound never interrupts playback; wake-word barge-in
+is accepted only after transcription identifies `Robin`, and Robin's own echoed speech is ignored.
 The hearing check captures audio *coming out of
 Chrome*—in a real Meet, speak from another participant or device. Speaking into the same Mac's
 physical microphone is not Chrome output and is therefore not a valid hearing test.

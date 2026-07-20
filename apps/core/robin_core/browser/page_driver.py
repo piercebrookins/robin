@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -7,7 +8,7 @@ from typing import Protocol
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
-from robin_core.meeting.selectors import SelectorCandidate
+from robin_core.meeting.selectors import MEET_SELECTORS, SelectorCandidate
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,8 @@ class PageDriver(Protocol):
     async def is_visible(self, candidates: list[SelectorCandidate], timeout_ms: int) -> bool: ...
 
     async def ensure_microphone_device(self, device_name: str, timeout_ms: int) -> str: ...
+
+    async def set_microphone_muted(self, muted: bool, timeout_ms: int) -> str: ...
 
     async def wait_for_presentation_ready(
         self,
@@ -154,6 +157,15 @@ class SimulatedPageDriver:
             raise RuntimeError(f"Meet microphone device is unavailable: {device_name}")
         self.microphone_device = matching
         return matching
+
+    async def set_microphone_muted(self, muted: bool, timeout_ms: int) -> str:
+        currently_muted = "unmute_button" in self.visible_keys
+        if muted != currently_muted:
+            await self.click_first(
+                MEET_SELECTORS["mute_button" if muted else "unmute_button"],
+                timeout_ms,
+            )
+        return "muted" if muted else "unmuted"
 
     async def screenshot(self) -> bytes:
         keys = ",".join(sorted(self.visible_keys))
@@ -412,6 +424,65 @@ class PlaywrightPageDriver:
         if "blackhole" in target:
             await self._disable_virtual_microphone_processing(timeout_ms)
         return verified
+
+    async def set_microphone_muted(self, muted: bool, timeout_ms: int) -> str:
+        """Set and verify Meet microphone state, with a keyboard fallback.
+
+        Meet auto-hides the in-call toolbar and occasionally removes its mic
+        button from the visible accessibility tree. The documented Command-D
+        shortcut still toggles the local microphone in that state.
+        """
+
+        desired = MEET_SELECTORS["unmute_button" if muted else "mute_button"]
+        action = MEET_SELECTORS["mute_button" if muted else "unmute_button"]
+
+        async def attached(candidates: list[SelectorCandidate]) -> bool:
+            for candidate in candidates:
+                try:
+                    if candidate.role and candidate.name_regex:
+                        locator = self.page.locator(f'{candidate.role},[role="{candidate.role}"]')
+                        pattern = re.compile(candidate.name_regex, re.I)
+                        for index in range(await locator.count()):
+                            element = locator.nth(index)
+                            name = (
+                                await element.get_attribute("aria-label")
+                                or await element.get_attribute("title")
+                                or await element.text_content()
+                                or ""
+                            ).strip()
+                            if pattern.search(name):
+                                return True
+                        continue
+                    locator = self._locator(candidate)
+                    for index in range(await locator.count()):
+                        if await locator.nth(index).is_attached():
+                            return True
+                except Exception:
+                    continue
+            return False
+
+        if await attached(desired):
+            return "muted" if muted else "unmuted"
+
+        clicked = False
+        try:
+            if await self.is_visible(action, min(timeout_ms, 1_000)):
+                await self.click_first(action, timeout_ms)
+                clicked = True
+        except Exception:
+            clicked = False
+        if not clicked:
+            await self.page.bring_to_front()
+            await self.page.keyboard.press("Meta+d")
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(timeout_ms, 250) / 1000
+        while loop.time() < deadline:
+            if await attached(desired):
+                return "muted" if muted else "unmuted"
+            await self.page.wait_for_timeout(50)
+        state = "mute" if muted else "unmute"
+        raise RuntimeError(f"Meet did not confirm {state} after button and shortcut recovery")
 
     async def _disable_virtual_microphone_processing(self, timeout_ms: int) -> None:
         """Keep Meet from filtering or merging an injected virtual-mic signal."""
