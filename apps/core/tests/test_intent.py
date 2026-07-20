@@ -40,6 +40,19 @@ async def test_addressed_voice_check_is_a_conversation_request() -> None:
 
 
 @pytest.mark.asyncio
+async def test_addressed_ambiguous_request_still_requires_confirmation() -> None:
+    classifier = IntentClassifier(Settings())
+
+    intent = await classifier.classify(
+        "Robin, could someone compare the finance files and make slides?", []
+    )
+
+    assert intent.classification == "possible_task"
+    assert intent.addressed_to_robin is True
+    assert intent.should_ask_confirmation is True
+
+
+@pytest.mark.asyncio
 async def test_source_question_is_not_misclassified_as_task_revision() -> None:
     classifier = IntentClassifier(Settings())
     task = RobinTask(

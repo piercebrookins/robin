@@ -84,6 +84,7 @@ class AudioConfig(BaseModel):
     streaming_speech_sample_rate: int = 24_000
     output_device_name: str = "BlackHole 2ch"
     post_speech_cooldown_ms: int = 700
+    wake_word: str = "robin"
     simulator_transcript: str = (
         "Robin, use the finance files to compare the quarterly results and make slides."
     )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import resource
 import subprocess
 import sys
@@ -110,6 +111,8 @@ class RobinRuntime:
         self._last_audio_text_at_ms: int = 0
         self._last_silence_event_at_ms: int = 0
         self._realtime_partials: dict[str, str] = {}
+        self._realtime_barge_in_items: set[str] = set()
+        self._active_spoken_text: str | None = None
         self._meet_recovery_event_count = 0
         self.refresh_health()
 
@@ -1047,11 +1050,25 @@ class RobinRuntime:
                 {"item_id": item_id, "text": text},
                 component="audio",
             )
+            if item_id not in self._realtime_barge_in_items and self._should_accept_barge_in(text):
+                interrupted = await self.audio.interrupt_speech()
+                if interrupted:
+                    self._realtime_barge_in_items.add(item_id)
+                await self.emit_event(
+                    "audio.barge_in.accepted",
+                    {
+                        "item_id": item_id,
+                        "text": text,
+                        "playback_interrupted": interrupted,
+                    },
+                    component="audio",
+                )
             await self.publish()
 
         async def on_final(item_id: str, transcript: str) -> None:
             nonlocal completed_turns
             self._realtime_partials.pop(item_id, None)
+            self._realtime_barge_in_items.discard(item_id)
             text = transcript.strip()
             if not text:
                 return
@@ -1088,12 +1105,12 @@ class RobinRuntime:
 
         async def on_speech_started() -> None:
             speaking = self.meeting_state == MeetingState.SPEAKING
-            interrupted = await self.audio.interrupt_speech() if speaking else False
             await self.emit_event(
                 "audio.speech.detected",
                 {
                     "while_robin_speaking": speaking,
-                    "playback_interrupted": interrupted,
+                    "playback_interrupted": False,
+                    "wake_word_required": self.settings.audio.wake_word,
                 },
                 component="audio",
             )
@@ -1182,8 +1199,13 @@ class RobinRuntime:
         return best.speaker_name, "merged"
 
     def _is_recent_robin_echo(self, text: str) -> bool:
-        spoken = self.audio.last_spoken_text
-        if not spoken or int(time.time() * 1000) - self._last_spoken_at_ms > 15_000:
+        spoken = self._active_spoken_text or self.audio.last_spoken_text
+        if not spoken:
+            return False
+        if (
+            self._active_spoken_text is None
+            and int(time.time() * 1000) - self._last_spoken_at_ms > 15_000
+        ):
             return False
         normalized = " ".join(text.casefold().split())
         expected = " ".join(spoken.casefold().split())
@@ -1193,6 +1215,31 @@ class RobinRuntime:
             normalized in expected
             or expected in normalized
             or SequenceMatcher(None, normalized, expected).ratio() >= 0.78
+        )
+
+    def _contains_wake_word(self, text: str) -> bool:
+        wake_word = " ".join(self.settings.audio.wake_word.casefold().split())
+        if not wake_word:
+            return True
+        return bool(re.search(rf"(?<!\w){re.escape(wake_word)}(?!\w)", text.casefold()))
+
+    def _strip_wake_word(self, text: str) -> str:
+        wake_word = " ".join(self.settings.audio.wake_word.casefold().split())
+        if not wake_word:
+            return text.strip()
+        cleaned = re.sub(
+            rf"(?<!\w){re.escape(wake_word)}(?!\w)",
+            " ",
+            text,
+            flags=re.I,
+        )
+        return " ".join(cleaned.strip(" ,.:;!?-").split())
+
+    def _should_accept_barge_in(self, text: str) -> bool:
+        return (
+            self.meeting_state == MeetingState.SPEAKING
+            and self._contains_wake_word(text)
+            and not self._is_recent_robin_echo(text)
         )
 
     async def create_task(self, text: str, requester_name: str | None = None) -> RobinTask:
@@ -1465,6 +1512,13 @@ class RobinRuntime:
         return candidate[: max_chars - 1].rstrip(" ,;:") + "."
 
     async def _handle_intent(self, segment: TranscriptSegment) -> None:
+        if not self._contains_wake_word(segment.text):
+            await self.emit_event(
+                "conversation.ignored",
+                {"text": segment.text, "reason": "wake_word_missing"},
+                component="conversation",
+            )
+            return
         if await self._handle_pending_confirmation(segment):
             return
         if await self._handle_duplicate_task_request(segment.text):
@@ -1583,7 +1637,7 @@ class RobinRuntime:
     async def _handle_pending_confirmation(self, segment: TranscriptSegment) -> bool:
         if not self._pending_confirmation:
             return False
-        lowered = segment.text.strip().lower()
+        lowered = self._strip_wake_word(segment.text).casefold()
         accepts = {
             "yes",
             "yeah",
@@ -1979,6 +2033,7 @@ class RobinRuntime:
             previous = self.meeting_state
             await self._wait_for_speech_floor(text)
             self.meeting_state = MeetingState.SPEAKING
+            self._active_spoken_text = text
             await self.publish()
             try:
                 await self.meet.unmute()
@@ -1986,10 +2041,15 @@ class RobinRuntime:
                 return await self._speak_and_record(text)
             finally:
                 self._last_spoken_at_ms = int(time.time() * 1000)
-                await self.meet.mute()
-                await self._emit_meet_recovery_events()
-                self.meeting_state = previous if previous != MeetingState.IDLE else self.meet.state
-                await self.publish()
+                try:
+                    await self.meet.mute()
+                    await self._emit_meet_recovery_events()
+                finally:
+                    self._active_spoken_text = None
+                    self.meeting_state = (
+                        previous if previous != MeetingState.IDLE else self.meet.state
+                    )
+                    await self.publish()
 
     async def _speak_and_record(self, text: str) -> SpeechRecord:
         speech = await self.audio.speak(text)

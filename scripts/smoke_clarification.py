@@ -22,13 +22,15 @@ async def main() -> None:
         database=DatabaseConfig(path=db_path),
     )
     runtime = RobinRuntime(settings)
-    await runtime.ingest_transcript("Could someone compare the finance files and make slides?", "Demo")
+    await runtime.ingest_transcript(
+        "Robin, could someone compare the finance files and make slides?", "Demo"
+    )
     if len(runtime.tasks) != 1 or runtime.tasks[-1].status != TaskStatus.AWAITING_CLARIFICATION:
         raise SystemExit("Ambiguous request did not create an awaiting-clarification task.")
     pending_id = runtime.tasks[-1].id
     if not runtime.speech or runtime.speech[-1].text != "Should I take that on?":
         raise SystemExit("Robin did not ask for confirmation.")
-    await runtime.ingest_transcript("Yes, please do.", "Demo")
+    await runtime.ingest_transcript("Robin, yes, please do.", "Demo")
     task = runtime.tasks[-1]
     if task.id != pending_id:
         raise SystemExit("Clarification accepted a different task record.")

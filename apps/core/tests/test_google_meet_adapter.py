@@ -246,6 +246,38 @@ async def test_playwright_driver_selects_and_verifies_meet_microphone() -> None:
 
 
 @pytest.mark.asyncio
+async def test_playwright_driver_uses_shortcut_when_meet_toolbar_is_hidden() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(
+            """
+            <button id="mic" aria-label="Turn on microphone" style="display:none"></button>
+            """
+        )
+        driver = PlaywrightPageDriver(page)
+
+        async def meet_shortcut(key: str) -> None:
+            assert key == "Meta+d"
+            await page.locator("#mic").evaluate(
+                """mic => mic.setAttribute(
+                    'aria-label',
+                    mic.getAttribute('aria-label').startsWith('Turn on')
+                      ? 'Turn off microphone'
+                      : 'Turn on microphone'
+                )"""
+            )
+
+        page.keyboard.press = meet_shortcut  # type: ignore[method-assign]
+
+        assert await driver.set_microphone_muted(False, 1_000) == "unmuted"
+        assert await page.locator("#mic").get_attribute("aria-label") == "Turn off microphone"
+        assert await driver.set_microphone_muted(True, 1_000) == "muted"
+        assert await page.locator("#mic").get_attribute("aria-label") == "Turn on microphone"
+        await browser.close()
+
+
+@pytest.mark.asyncio
 async def test_playwright_driver_disables_processing_for_blackhole() -> None:
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)

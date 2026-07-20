@@ -19,6 +19,7 @@ from robin_core.config import (
 from robin_core.runtime import RobinRuntime
 from robin_core.schemas import (
     MeetingState,
+    MeetingIntent,
     PresentationSession,
     RehearsalConfirmationRequest,
     RobinTask,
@@ -335,6 +336,48 @@ async def test_addressed_voice_check_gets_an_audible_reply_without_creating_task
     assert runtime.tasks == []
     assert runtime.speech[-1].text.startswith("Yes, I can hear you.")
     assert any(event.type == "conversation.addressed" for event in runtime.recent_events())
+
+
+@pytest.mark.asyncio
+async def test_unaddressed_meeting_turn_is_transcribed_but_never_answered(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+            audio=AudioConfig(mode="simulator"),
+        )
+    )
+
+    await runtime.ingest_transcript(
+        "Please make slides from the finance files.",
+        speaker_name="Avery",
+        source="audio_stt",
+    )
+
+    assert runtime.transcript[-1].text == "Please make slides from the finance files."
+    assert runtime.tasks == []
+    assert runtime.speech == []
+    ignored = [event for event in runtime.recent_events() if event.type == "conversation.ignored"]
+    assert ignored[-1].payload["reason"] == "wake_word_missing"
+
+
+def test_barge_in_requires_wake_word_and_rejects_robin_echo(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+        )
+    )
+    runtime.meeting_state = MeetingState.SPEAKING
+    runtime._active_spoken_text = "Robin voice check. If you can hear this, audio is working."
+
+    assert runtime._should_accept_barge_in("Robin voice check") is False
+    assert runtime._should_accept_barge_in("Please stop") is False
+
+    runtime._active_spoken_text = "The analysis and slides are ready."
+    assert runtime._should_accept_barge_in("Robin, stop") is True
 
 
 @pytest.mark.asyncio
@@ -893,26 +936,39 @@ async def test_ambiguous_request_requires_confirmation_before_task(tmp_path: Pat
     )
     runtime = RobinRuntime(settings)
 
+    async def ambiguous_intent(_text: str, _active: list[RobinTask]) -> MeetingIntent:
+        return MeetingIntent(
+            classification="possible_task",
+            confidence=0.65,
+            addressed_to_robin=True,
+            task_title="Compare finance files",
+            requested_outcome="Compare the finance files and make slides",
+            should_ask_confirmation=True,
+            clarification_question="Should I take that on?",
+        )
+
+    runtime.intent.classify = ambiguous_intent  # type: ignore[method-assign]
+
     await runtime.ingest_transcript(
-        "Could someone compare the finance files and make slides?", "Avery"
+        "Robin, could someone compare the finance files and make slides?", "Avery"
     )
 
     assert len(runtime.tasks) == 1
     pending = runtime.tasks[-1]
     assert pending.status == TaskStatus.AWAITING_CLARIFICATION
     assert pending.outcome_state == TaskOutcomeState.AWAITING_CONFIRMATION
-    assert pending.request_text == "Could someone compare the finance files and make slides?"
+    assert pending.request_text == "Robin, could someone compare the finance files and make slides?"
     assert runtime.speech[-1].text == "Should I take that on?"
     assert any(event.type == "clarification.requested" for event in runtime.recent_events())
     assert any(event.type == "task.awaiting_clarification" for event in runtime.recent_events())
 
-    await runtime.ingest_transcript("Yes, please do.", "Blair")
+    await runtime.ingest_transcript("Robin, yes, please do.", "Blair")
     task = runtime.tasks[-1]
     await runtime._task_handles[task.id]
 
     assert task.id == pending.id
     assert task.status == TaskStatus.READY_TO_PRESENT
-    assert task.request_text == "Could someone compare the finance files and make slides?"
+    assert task.request_text == "Robin, could someone compare the finance files and make slides?"
     assert task.source_context_segment_ids[-1] == runtime.transcript[-1].id
     assert any(event.type == "clarification.accepted" for event in runtime.recent_events())
 
@@ -925,10 +981,23 @@ async def test_declined_ambiguous_request_cancels_pending_task(tmp_path: Path) -
     )
     runtime = RobinRuntime(settings)
 
-    await runtime.ingest_transcript("Could someone make a finance slide?", "Avery")
+    async def ambiguous_intent(_text: str, _active: list[RobinTask]) -> MeetingIntent:
+        return MeetingIntent(
+            classification="possible_task",
+            confidence=0.65,
+            addressed_to_robin=True,
+            task_title="Finance slide",
+            requested_outcome="Make a finance slide",
+            should_ask_confirmation=True,
+            clarification_question="Should I take that on?",
+        )
+
+    runtime.intent.classify = ambiguous_intent  # type: ignore[method-assign]
+
+    await runtime.ingest_transcript("Robin, could someone make a finance slide?", "Avery")
     task = runtime.tasks[-1]
     assert task.status == TaskStatus.AWAITING_CLARIFICATION
-    await runtime.ingest_transcript("No, ignore that.", "Blair")
+    await runtime.ingest_transcript("Robin, no, ignore that.", "Blair")
 
     assert len(runtime.tasks) == 1
     assert task.status == TaskStatus.CANCELLED

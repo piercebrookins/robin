@@ -31,6 +31,8 @@ class IntentClassifier:
                     and local.classification == "conversation_request"
                 ):
                     return local
+                if local.classification == "possible_task":
+                    return local
                 return intent
             except Exception:
                 return self._classify_local(text, active_tasks)
@@ -79,6 +81,9 @@ class IntentClassifier:
             phrase in lowered
             for phrase in ["make", "create", "build", "compare", "analyze", "show", "find", "pull"]
         )
+        is_ambiguous_request = any(
+            phrase in lowered for phrase in ["could someone", "should someone", "maybe you could"]
+        )
         ref_id: UUID | None = (
             active_tasks[0].id if active_tasks and (is_mod or is_cancel or is_status) else None
         )
@@ -88,6 +93,8 @@ class IntentClassifier:
             classification = "status_request"
         elif is_mod:
             classification = "task_modification"
+        elif addressed and asks_work and is_ambiguous_request:
+            classification = "possible_task"
         elif addressed and asks_work:
             classification = "direct_request"
         elif addressed:
