@@ -30,6 +30,17 @@ class BrowserRecoveryEvent:
 
 
 @dataclass
+class SpeechRouteTimingEvent:
+    type: str
+    started_at: datetime
+    completed_at: datetime
+    duration_ms: int
+    cache_status: str = "miss"
+    selected_device: str | None = None
+    error: str | None = None
+
+
+@dataclass
 class GoogleMeetAdapter:
     browser: BrowserController
     config: BrowserConfig
@@ -46,6 +57,9 @@ class GoogleMeetAdapter:
     share_dialog_result: ShareDialogResult | None = None
     presentation_evidence_path: str | None = None
     selected_microphone_device: str | None = None
+    speech_route_events: list[SpeechRouteTimingEvent] | None = None
+    speech_route_ready: bool = False
+    speech_route_device_name: str | None = None
 
     def __post_init__(self) -> None:
         if self.share_dialog is None:
@@ -57,6 +71,7 @@ class GoogleMeetAdapter:
             raise ValueError("Only Google Meet URLs are supported.")
         self.current_url = meeting_url
         self.selected_microphone_device = None
+        self.invalidate_speech_route()
         recovery_count = self.browser.recovery_count
         self.meet_page = await self.browser.open_page("meet", meeting_url)
         if self.browser.recovery_count > recovery_count:
@@ -202,6 +217,7 @@ class GoogleMeetAdapter:
         )
         if not self.current_url:
             raise RuntimeError("Cannot recover admission without a meeting URL")
+        self.invalidate_speech_route()
         self.meet_page = await self.browser.open_page("meet", self.current_url)
         if await self._is_admitted():
             self._record_recovery(
@@ -281,20 +297,107 @@ class GoogleMeetAdapter:
                 pass
         await self.browser.close_page("meet")
         self.meet_page = None
+        self.invalidate_speech_route()
         self.state = MeetingState.ENDED
         self.presenting = False
 
     async def mute(self) -> None:
-        if self.meet_page:
-            await self.meet_page.set_microphone_muted(True, 3_000)
-        self.muted = True
+        try:
+            if self.meet_page:
+                await self.meet_page.set_microphone_muted(True, 3_000)
+            self.muted = True
+        except Exception:
+            self.invalidate_speech_route()
+            raise
 
     async def unmute(self) -> None:
         if self.meet_page:
-            await self.ensure_microphone_device()
-            await self.meet_page.set_microphone_muted(False, 3_000)
-            await asyncio.sleep(max(self.config.microphone_settle_ms, 0) / 1000)
-        self.muted = False
+            selected = await self.prepare_speech_route()
+            unmute_started_at = datetime.now(timezone.utc)
+            unmute_started = time.perf_counter()
+            self._record_speech_route_event(
+                "speech.unmute.started",
+                unmute_started_at,
+                unmute_started,
+                selected_device=selected,
+            )
+            unmute_error = None
+            try:
+                await self.meet_page.set_microphone_muted(False, 3_000)
+                await asyncio.sleep(max(self.config.microphone_settle_ms, 0) / 1000)
+                self.muted = False
+            except Exception as exc:
+                unmute_error = str(exc)
+                self.invalidate_speech_route()
+                raise
+            finally:
+                self._record_speech_route_event(
+                    "speech.unmute.completed",
+                    unmute_started_at,
+                    unmute_started,
+                    selected_device=selected,
+                    error=unmute_error,
+                )
+        else:
+            self.muted = False
+
+    async def prepare_speech_route(self, force: bool = False) -> str:
+        if (
+            not force
+            and self.speech_route_ready
+            and self.selected_microphone_device
+            and self.speech_route_device_name == self.microphone_device_name
+        ):
+            started_at = datetime.now(timezone.utc)
+            started = time.perf_counter()
+            self._record_speech_route_event(
+                "speech.route_prepare.started",
+                started_at,
+                started,
+                selected_device=self.selected_microphone_device,
+                cache_status="hit",
+            )
+            self._record_speech_route_event(
+                "speech.route_prepare.completed",
+                started_at,
+                started,
+                selected_device=self.selected_microphone_device,
+                cache_status="hit",
+            )
+            return self.selected_microphone_device
+        started_at = datetime.now(timezone.utc)
+        started = time.perf_counter()
+        self._record_speech_route_event(
+            "speech.route_prepare.started",
+            started_at,
+            started,
+            cache_status="refresh" if force else "miss",
+        )
+        selected = None
+        route_error = None
+        try:
+            selected = await self.ensure_microphone_device()
+            self.selected_microphone_device = selected
+            self.speech_route_device_name = self.microphone_device_name
+            self.speech_route_ready = True
+            return selected
+        except Exception as exc:
+            route_error = str(exc)
+            self.invalidate_speech_route()
+            raise
+        finally:
+            self._record_speech_route_event(
+                "speech.route_prepare.completed",
+                started_at,
+                started,
+                selected_device=selected,
+                cache_status="refresh" if force else "miss",
+                error=route_error,
+            )
+
+    def invalidate_speech_route(self) -> None:
+        self.speech_route_ready = False
+        self.speech_route_device_name = None
 
     async def ensure_microphone_device(self) -> str:
         page = self._page()
@@ -316,6 +419,30 @@ class GoogleMeetAdapter:
             raise
         self.selected_microphone_device = selected
         return selected
+
+    def _record_speech_route_event(
+        self,
+        event_type: str,
+        started_at: datetime,
+        started: float,
+        *,
+        selected_device: str | None = None,
+        cache_status: str = "miss",
+        error: str | None = None,
+    ) -> None:
+        if self.speech_route_events is None:
+            self.speech_route_events = []
+        self.speech_route_events.append(
+            SpeechRouteTimingEvent(
+                type=event_type,
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc),
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                cache_status=cache_status,
+                selected_device=selected_device,
+                error=error,
+            )
+        )
 
     async def camera_off(self) -> None:
         self.camera_enabled = False

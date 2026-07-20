@@ -9,13 +9,14 @@ import sys
 import time
 from difflib import SequenceMatcher
 from pathlib import Path
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from .artifacts import ArtifactWorker
 from .agent import GeneralTaskAgent
-from .audio.bridge import AudioBridge
+from .audio.bridge import AudioBridge, PreparedSpeech
+from .audio.prefetch import NarrationItem, NarrationPrefetchCoordinator, PrefetchResult
 from .audio.realtime import RealtimeTranscriber
 from .calendar import calendar_snapshot
 from .config import Settings, load_settings
@@ -114,6 +115,7 @@ class RobinRuntime:
         self._realtime_barge_in_items: set[str] = set()
         self._active_spoken_text: str | None = None
         self._meet_recovery_event_count = 0
+        self._meet_speech_route_event_count = 0
         self.refresh_health()
 
     def snapshot(self) -> RuntimeSnapshot:
@@ -1237,7 +1239,13 @@ class RobinRuntime:
 
     def _should_accept_barge_in(self, text: str) -> bool:
         return (
-            self.meeting_state == MeetingState.SPEAKING
+            (
+                self.meeting_state == MeetingState.SPEAKING
+                or (
+                    self.meeting_state == MeetingState.PRESENTING
+                    and self._active_spoken_text is not None
+                )
+            )
             and self._contains_wake_word(text)
             and not self._is_recent_robin_echo(text)
         )
@@ -1323,6 +1331,31 @@ class RobinRuntime:
         if not deck or not deck.url:
             raise ValueError("Task has no presentation artifact.")
         deck_spec = self._load_deck(task_id)
+        narrations = [
+            self._slide_narration(deck_spec, index)
+            for index in range(len(deck_spec.slides))
+        ]
+        prefetch: NarrationPrefetchCoordinator | None = None
+        if self.settings.presentation.narration_prefetch_enabled:
+            prefetch = NarrationPrefetchCoordinator(
+                self.audio,
+                [
+                    NarrationItem(slide_index=index, text=text)
+                    for index, text in enumerate(narrations)
+                ],
+                concurrency=self.settings.presentation.narration_prefetch_concurrency,
+            )
+            prefetch.start()
+            await asyncio.sleep(0)
+            await self.emit_event(
+                "presentation.narration.prefetch_started",
+                {
+                    "slide_count": len(narrations),
+                    "concurrency": self.settings.presentation.narration_prefetch_concurrency,
+                },
+                task_id=task.id,
+                component="presentation",
+            )
         self.activate_presentation(task_id)
         task.status = TaskStatus.PRESENTING
         task.outcome_state = TaskOutcomeState.WORKING
@@ -1339,7 +1372,7 @@ class RobinRuntime:
             await self.meet.start_presenting(deck.url)
             self.meeting_state = self.meet.state
             await self._emit_meet_recovery_events(task.id)
-            await self._narrate_deck(task.id, deck_spec)
+            await self._narrate_deck(task.id, deck_spec, narrations, prefetch)
         except Exception as exc:
             task.error = str(exc)
             task.outcome_state = TaskOutcomeState.BLOCKED
@@ -1352,6 +1385,8 @@ class RobinRuntime:
             )
             raise
         finally:
+            if prefetch is not None:
+                await prefetch.close()
             if self.meet.presenting or self.presentations[task.id].active:
                 await self.stop_presenting(task.id)
         task.status = TaskStatus.COMPLETED
@@ -1456,25 +1491,80 @@ class RobinRuntime:
             raise ValueError("Task has no presentation deck.")
         return DeckSpec.model_validate_json(self.workspace.resolve(deck.path).read_text())
 
-    async def _narrate_deck(self, task_id: UUID, deck: DeckSpec) -> None:
-        for index, slide in enumerate(deck.slides):
-            await self.navigate_presentation(task_id, "goto", index=index)
-            speech = self._slide_narration(deck, index)
-            await self.emit_event(
-                "presentation.narration",
-                {"slide": index, "speech": speech},
-                task_id=task_id,
-                component="presentation",
-            )
-            record = await self._acknowledge(speech)
-            if record.interrupted:
+    async def _narrate_deck(
+        self,
+        task_id: UUID,
+        deck: DeckSpec,
+        narrations: list[str] | None = None,
+        prefetch: NarrationPrefetchCoordinator | None = None,
+    ) -> None:
+        narration_texts = narrations or [
+            self._slide_narration(deck, index)
+            for index in range(len(deck.slides))
+        ]
+        async with self._presentation_speech_session(task_id):
+            for index, slide in enumerate(deck.slides):
+                prefetch_result: PrefetchResult | None = None
+                if prefetch is not None:
+                    prefetch_result = await prefetch.get(index)
+                slide_started = time.perf_counter()
                 await self.emit_event(
-                    "presentation.narration.interrupted",
-                    {"slide": index},
+                    "presentation.slide.started",
+                    {"slide_index": index, "title": slide.title[:160]},
                     task_id=task_id,
                     component="presentation",
                 )
-                break
+                await self.navigate_presentation(task_id, "goto", index=index)
+                speech = narration_texts[index]
+                await self.emit_event(
+                    "presentation.narration",
+                    {"slide": index, "speech": speech[:240]},
+                    task_id=task_id,
+                    component="presentation",
+                )
+                if (
+                    prefetch_result is not None
+                    and prefetch_result.prepared is not None
+                    and prefetch_result.error is None
+                ):
+                    record = await self._play_prepared_during_session(
+                        prefetch_result.prepared,
+                        task_id=task_id,
+                        slide_index=index,
+                    )
+                    prefetch.mark_consumed(index)
+                else:
+                    if prefetch_result is not None and prefetch_result.error:
+                        await self.emit_event(
+                            "presentation.narration.prefetch_failed",
+                            {"slide_index": index, "error": prefetch_result.error},
+                            task_id=task_id,
+                            component="presentation",
+                        )
+                    record = await self._speak_during_session(
+                        speech,
+                        task_id=task_id,
+                        slide_index=index,
+                        source="fallback" if prefetch_result is not None else None,
+                    )
+                await self.emit_event(
+                    "presentation.slide.completed",
+                    {
+                        "slide_index": index,
+                        "duration_ms": int((time.perf_counter() - slide_started) * 1000),
+                        "interrupted": record.interrupted,
+                    },
+                    task_id=task_id,
+                    component="presentation",
+                )
+                if record.interrupted:
+                    await self.emit_event(
+                        "presentation.narration.interrupted",
+                        {"slide": index},
+                        task_id=task_id,
+                        component="presentation",
+                    )
+                    break
 
     def _slide_narration(self, deck: DeckSpec, index: int) -> str:
         slide = deck.slides[index]
@@ -2028,17 +2118,40 @@ class RobinRuntime:
             )
             await self.publish()
 
-    async def _acknowledge(self, text: str) -> SpeechRecord:
+    @asynccontextmanager
+    async def _presentation_speech_session(self, task_id: UUID | None = None):
+        async with self._speech_lock:
+            previous = self.meeting_state
+            await self._wait_for_speech_floor("presentation narration")
+            await self.meet.unmute()
+            await self._emit_meet_recovery_events(task_id)
+            await self._emit_meet_speech_route_events(task_id)
+            self.meeting_state = MeetingState.PRESENTING
+            await self.publish()
+            try:
+                yield
+            finally:
+                self._last_spoken_at_ms = int(time.time() * 1000)
+                try:
+                    await self.meet.mute()
+                    await self._emit_meet_recovery_events(task_id)
+                finally:
+                    self._active_spoken_text = None
+                    self.meeting_state = previous if previous != MeetingState.IDLE else self.meet.state
+                    await self.publish()
+
+    @asynccontextmanager
+    async def _isolated_speech_session(self, text: str):
         async with self._speech_lock:
             previous = self.meeting_state
             await self._wait_for_speech_floor(text)
+            await self.meet.unmute()
+            await self._emit_meet_recovery_events()
+            await self._emit_meet_speech_route_events()
             self.meeting_state = MeetingState.SPEAKING
-            self._active_spoken_text = text
             await self.publish()
             try:
-                await self.meet.unmute()
-                await self._emit_meet_recovery_events()
-                return await self._speak_and_record(text)
+                yield
             finally:
                 self._last_spoken_at_ms = int(time.time() * 1000)
                 try:
@@ -2051,8 +2164,103 @@ class RobinRuntime:
                     )
                     await self.publish()
 
-    async def _speak_and_record(self, text: str) -> SpeechRecord:
+    async def _speak_during_session(
+        self,
+        text: str,
+        *,
+        task_id: UUID | None = None,
+        slide_index: int | None = None,
+        source: str | None = None,
+    ) -> SpeechRecord:
+        self._active_spoken_text = text
+        await self.publish()
+        try:
+            return await self._speak_and_record(
+                text,
+                task_id=task_id,
+                slide_index=slide_index,
+                source=source,
+            )
+        finally:
+            self._active_spoken_text = None
+            await self.publish()
+
+    async def _play_prepared_during_session(
+        self,
+        prepared: PreparedSpeech,
+        *,
+        task_id: UUID | None = None,
+        slide_index: int | None = None,
+    ) -> SpeechRecord:
+        self._active_spoken_text = prepared.text
+        await self.publish()
+        try:
+            return await self._play_prepared_and_record(
+                prepared,
+                task_id=task_id,
+                slide_index=slide_index,
+            )
+        finally:
+            self._active_spoken_text = None
+            await self.publish()
+
+    async def _acknowledge(
+        self,
+        text: str,
+        *,
+        task_id: UUID | None = None,
+        slide_index: int | None = None,
+    ) -> SpeechRecord:
+        async with self._isolated_speech_session(text):
+            return await self._speak_during_session(
+                text,
+                task_id=task_id,
+                slide_index=slide_index,
+            )
+
+    async def _speak_and_record(
+        self,
+        text: str,
+        *,
+        task_id: UUID | None = None,
+        slide_index: int | None = None,
+        source: str | None = None,
+    ) -> SpeechRecord:
+        await self.emit_event(
+            "speech.synthesis.started",
+            {"task_id": str(task_id) if task_id else None, "slide_index": slide_index},
+            task_id=task_id,
+            component="speech",
+        )
         speech = await self.audio.speak(text)
+        if source:
+            speech.source = source  # type: ignore[assignment]
+        if speech.time_to_first_audio_ms is not None:
+            await self.emit_event(
+                "speech.first_audio",
+                {
+                    "task_id": str(task_id) if task_id else None,
+                    "slide_index": slide_index,
+                    "time_to_first_audio_ms": speech.time_to_first_audio_ms,
+                    "streaming": speech.streaming,
+                    "source": speech.source,
+                },
+                task_id=task_id,
+                component="speech",
+            )
+        await self.emit_event(
+            "speech.playback.started",
+            {
+                "task_id": str(task_id) if task_id else None,
+                "slide_index": slide_index,
+                "path": speech.path,
+                "streaming": speech.streaming,
+                "source": speech.source,
+                "synthesis_duration_ms": speech.synthesis_duration_ms,
+            },
+            task_id=task_id,
+            component="speech",
+        )
         if speech.path:
             speech.path = (
                 Path(self.settings.workspace.sessions_dir) / "speech" / speech.path
@@ -2062,6 +2270,82 @@ class RobinRuntime:
         await self.emit_event(
             "speech.interrupted" if speech.interrupted else "speech.completed",
             speech.model_dump(mode="json"),
+            task_id=task_id,
+            component="speech",
+        )
+        await self.emit_event(
+            "speech.playback.completed",
+            {
+                "task_id": str(task_id) if task_id else None,
+                "slide_index": slide_index,
+                "duration_ms": speech.playback_duration_ms,
+                "interrupted": speech.interrupted,
+                "streaming": speech.streaming,
+                "source": speech.source,
+                "error": speech.error,
+            },
+            task_id=task_id,
+            component="speech",
+        )
+        return speech
+
+    async def _play_prepared_and_record(
+        self,
+        prepared: PreparedSpeech,
+        *,
+        task_id: UUID | None = None,
+        slide_index: int | None = None,
+    ) -> SpeechRecord:
+        await self.emit_event(
+            "speech.synthesis.started",
+            {
+                "task_id": str(task_id) if task_id else None,
+                "slide_index": slide_index,
+                "source": "prefetched",
+                "prepared": True,
+                "synthesis_duration_ms": prepared.synthesis_duration_ms,
+            },
+            task_id=task_id,
+            component="speech",
+        )
+        speech = await self.audio.play_prepared(prepared)
+        await self.emit_event(
+            "speech.playback.started",
+            {
+                "task_id": str(task_id) if task_id else None,
+                "slide_index": slide_index,
+                "path": speech.path,
+                "streaming": speech.streaming,
+                "source": speech.source,
+                "synthesis_duration_ms": speech.synthesis_duration_ms,
+            },
+            task_id=task_id,
+            component="speech",
+        )
+        if speech.path:
+            speech.path = (
+                Path(self.settings.workspace.sessions_dir) / "speech" / speech.path
+            ).as_posix()
+        self.speech.append(speech)
+        self.store.upsert("speech", speech)
+        await self.emit_event(
+            "speech.interrupted" if speech.interrupted else "speech.completed",
+            speech.model_dump(mode="json"),
+            task_id=task_id,
+            component="speech",
+        )
+        await self.emit_event(
+            "speech.playback.completed",
+            {
+                "task_id": str(task_id) if task_id else None,
+                "slide_index": slide_index,
+                "duration_ms": speech.playback_duration_ms,
+                "interrupted": speech.interrupted,
+                "streaming": speech.streaming,
+                "source": speech.source,
+                "error": speech.error,
+            },
+            task_id=task_id,
             component="speech",
         )
         return speech
@@ -2106,6 +2390,25 @@ class RobinRuntime:
                 component="browser",
             )
         self._meet_recovery_event_count = len(events)
+
+    async def _emit_meet_speech_route_events(self, task_id: UUID | None = None) -> None:
+        events = self.meet.speech_route_events or []
+        emitted_count = getattr(self, "_meet_speech_route_event_count", 0)
+        for event in events[emitted_count:]:
+            await self.emit_event(
+                event.type,
+                {
+                    "started_at": event.started_at.isoformat(),
+                    "completed_at": event.completed_at.isoformat(),
+                    "duration_ms": event.duration_ms,
+                    "cache_status": event.cache_status,
+                    "selected_device": event.selected_device,
+                    "error": event.error,
+                },
+                task_id=task_id,
+                component="speech",
+            )
+        self._meet_speech_route_event_count = len(events)
 
     def _status_summary(self) -> str:
         active = self._active_tasks()

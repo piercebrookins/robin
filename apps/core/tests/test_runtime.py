@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import zipfile
 from pathlib import Path
+from uuid import uuid4
 
 import fitz
 import pytest
 
+from robin_core.audio.bridge import PreparedSpeech
+from robin_core.audio.prefetch import NarrationItem, NarrationPrefetchCoordinator
 from robin_core.browser.page_driver import CaptionTurn, SimulatedPageDriver
 from robin_core.config import (
     AudioConfig,
@@ -18,12 +21,15 @@ from robin_core.config import (
 )
 from robin_core.runtime import RobinRuntime
 from robin_core.schemas import (
+    DeckSpec,
     MeetingState,
     MeetingIntent,
     PresentationSession,
     RehearsalConfirmationRequest,
     RobinTask,
     RuntimeState,
+    SlideSpec,
+    SpeechRecord,
     TaskOutcomeState,
     TaskStatus,
     ValidationReport,
@@ -523,6 +529,25 @@ async def test_stop_presenting_deactivates_presentation_session(tmp_path: Path) 
     await runtime._task_handles[task.id]
     slide_count = runtime._deck_slide_count(task.id)
     speech_before = len(runtime.speech)
+    assert isinstance(runtime.meet.meet_page, SimulatedPageDriver)
+    page = runtime.meet.meet_page
+    unmute_before = page.clicked.count("unmute_button")
+    mute_before = page.clicked.count("mute_button")
+    route_events_before = len(runtime.meet.speech_route_events or [])
+    prefetch_started = asyncio.Event()
+    original_prepare = runtime.audio.prepare_speech
+    original_start_presenting = runtime.meet.start_presenting
+
+    async def prepare_and_signal(text: str):
+        prefetch_started.set()
+        return await original_prepare(text)
+
+    async def start_presenting_after_prefetch_started(url: str) -> None:
+        assert prefetch_started.is_set()
+        await original_start_presenting(url)
+
+    runtime.audio.prepare_speech = prepare_and_signal  # type: ignore[method-assign]
+    runtime.meet.start_presenting = start_presenting_after_prefetch_started  # type: ignore[method-assign]
 
     await runtime.present_task(task.id)
     stopped = await runtime.stop_presenting(task.id)
@@ -530,13 +555,277 @@ async def test_stop_presenting_deactivates_presentation_session(tmp_path: Path) 
     assert stopped.presenting is False
     assert runtime.presentations[task.id].active is False
     assert len(runtime.speech) >= speech_before + slide_count
+    presented_speech = runtime.speech[speech_before:]
+    assert len(presented_speech) == slide_count
+    assert {speech.source for speech in presented_speech} == {"prefetched"}
+    assert page.clicked.count("unmute_button") == unmute_before + 1
+    assert page.clicked.count("mute_button") == mute_before + 1
+    route_events = runtime.meet.speech_route_events or []
+    presentation_route_completions = [
+        event
+        for event in route_events[route_events_before:]
+        if event.type == "speech.route_prepare.completed"
+    ]
+    assert len(presentation_route_completions) == 1
+    assert presentation_route_completions[0].cache_status == "hit"
+    assert runtime.meet.muted is True
     assert any("Revenue increased" in speech.text for speech in runtime.speech)
     assert any("Key metrics:" in speech.text for speech in runtime.speech)
     assert (
         sum(1 for event in runtime.recent_events(200) if event.type == "presentation.narration")
         >= slide_count
     )
+    trace_types = {event.type for event in runtime.recent_events(400)}
+    assert "speech.route_prepare.started" in trace_types
+    assert "speech.route_prepare.completed" in trace_types
+    assert "speech.unmute.started" in trace_types
+    assert "speech.unmute.completed" in trace_types
+    assert "speech.synthesis.started" in trace_types
+    assert "speech.playback.started" in trace_types
+    assert "speech.playback.completed" in trace_types
+    assert "presentation.slide.started" in trace_types
+    assert "presentation.slide.completed" in trace_types
+    assert "presentation.narration.prefetch_started" in trace_types
     assert any(event.type == "presentation.stopped" for event in runtime.recent_events())
+
+
+@pytest.mark.asyncio
+async def test_prefetch_failure_falls_back_and_later_slides_stay_prepared(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+            presentation=PresentationConfig(base_url="http://127.0.0.1:3000/present"),
+        )
+    )
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    task_id = uuid4()
+    runtime.presentations[task_id] = PresentationSession(
+        task_id=task_id,
+        active=True,
+        slide_count=2,
+    )
+    deck = DeckSpec(
+        task_id=task_id,
+        revision=1,
+        title="Fallback deck",
+        slides=[
+            SlideSpec(type="title", title="One", body=["First"]),
+            SlideSpec(type="executive_summary", title="Two", body=["Second"]),
+        ],
+        sources=[],
+    )
+    original_prepare = runtime.audio.prepare_speech
+
+    async def prepare_with_one_failure(text: str):
+        if text == "first narration":
+            partial = runtime.audio.output_dir / "partial.wav"
+            partial.parent.mkdir(parents=True, exist_ok=True)
+            partial.write_bytes(b"partial")
+            return PreparedSpeech(
+                text=text,
+                path=partial,
+                model="model",
+                voice="voice",
+                format="wav",
+                mode="simulator",
+                error="synthetic failure",
+            )
+        return await original_prepare(text)
+
+    runtime.audio.prepare_speech = prepare_with_one_failure  # type: ignore[method-assign]
+    narrations = ["first narration", "second narration"]
+    prefetch = NarrationPrefetchCoordinator(
+        runtime.audio,
+        [NarrationItem(index, text) for index, text in enumerate(narrations)],
+        concurrency=2,
+    )
+    prefetch.start()
+
+    try:
+        await runtime._narrate_deck(task_id, deck, narrations, prefetch)
+    finally:
+        await prefetch.close()
+
+    assert [speech.source for speech in runtime.speech[-2:]] == ["fallback", "prefetched"]
+    assert any(
+        event.type == "presentation.narration.prefetch_failed"
+        for event in runtime.recent_events(200)
+    )
+    assert not (runtime.audio.output_dir / "partial.wav").exists()
+
+
+@pytest.mark.asyncio
+async def test_disabled_prefetch_uses_streaming_narration_path(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+            presentation=PresentationConfig(
+                base_url="http://127.0.0.1:3000/present",
+                narration_prefetch_enabled=False,
+            ),
+        )
+    )
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    task_id = uuid4()
+    runtime.presentations[task_id] = PresentationSession(
+        task_id=task_id,
+        active=True,
+        slide_count=1,
+    )
+    deck = DeckSpec(
+        task_id=task_id,
+        revision=1,
+        title="Streaming deck",
+        slides=[SlideSpec(type="title", title="One", body=["First"])],
+        sources=[],
+    )
+
+    await runtime._narrate_deck(task_id, deck, ["streaming narration"], prefetch=None)
+
+    assert runtime.speech[-1].source == "streamed"
+    assert not any(
+        event.type == "presentation.narration.prefetch_started"
+        for event in runtime.recent_events(100)
+    )
+
+
+@pytest.mark.asyncio
+async def test_deck_narration_failure_mutes_microphone(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+        )
+    )
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    task_id = uuid4()
+    runtime.presentations[task_id] = PresentationSession(
+        task_id=task_id,
+        active=True,
+        slide_count=1,
+    )
+    deck = DeckSpec(
+        task_id=task_id,
+        revision=1,
+        title="Failure deck",
+        slides=[SlideSpec(type="title", title="One", body=["First"])],
+        sources=[],
+    )
+
+    async def fail_speech(_text: str) -> SpeechRecord:
+        raise RuntimeError("playback failed")
+
+    runtime.audio.speak = fail_speech  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="playback failed"):
+        await runtime._narrate_deck(task_id, deck, ["failing narration"], prefetch=None)
+
+    assert runtime.meet.muted is True
+
+
+@pytest.mark.asyncio
+async def test_deck_narration_cancellation_mutes_microphone(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+        )
+    )
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    task_id = uuid4()
+    runtime.presentations[task_id] = PresentationSession(
+        task_id=task_id,
+        active=True,
+        slide_count=1,
+    )
+    deck = DeckSpec(
+        task_id=task_id,
+        revision=1,
+        title="Cancellation deck",
+        slides=[SlideSpec(type="title", title="One", body=["First"])],
+        sources=[],
+    )
+    speech_started = asyncio.Event()
+
+    async def hang_speech(_text: str) -> SpeechRecord:
+        speech_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    runtime.audio.speak = hang_speech  # type: ignore[method-assign]
+    handle = asyncio.create_task(
+        runtime._narrate_deck(task_id, deck, ["cancellable narration"], prefetch=None)
+    )
+    await speech_started.wait()
+
+    handle.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await handle
+
+    assert runtime.meet.muted is True
+
+
+@pytest.mark.asyncio
+async def test_interrupted_deck_narration_stops_subsequent_slides(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+        )
+    )
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    task_id = uuid4()
+    runtime.presentations[task_id] = PresentationSession(
+        task_id=task_id,
+        active=True,
+        slide_count=2,
+    )
+    deck = DeckSpec(
+        task_id=task_id,
+        revision=1,
+        title="Interrupted deck",
+        slides=[
+            SlideSpec(type="title", title="One", body=["First"]),
+            SlideSpec(type="executive_summary", title="Two", body=["Second"]),
+        ],
+        sources=[],
+    )
+
+    async def interrupted_speech(text: str) -> SpeechRecord:
+        return SpeechRecord(
+            text=text,
+            mode="simulator",
+            voice="alloy",
+            model="simulator",
+            format="wav",
+            interrupted=True,
+        )
+
+    runtime.audio.speak = interrupted_speech  # type: ignore[method-assign]
+
+    await runtime._narrate_deck(
+        task_id,
+        deck,
+        ["interrupted narration", "should not play"],
+        prefetch=None,
+    )
+
+    assert [speech.text for speech in runtime.speech[-1:]] == ["interrupted narration"]
+    assert runtime.presentations[task_id].active_slide == 0
+    assert any(
+        event.type == "presentation.narration.interrupted"
+        for event in runtime.recent_events(100)
+    )
+    assert runtime.meet.muted is True
 
 
 @pytest.mark.asyncio

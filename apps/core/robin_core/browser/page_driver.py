@@ -565,19 +565,33 @@ class PlaywrightPageDriver:
             except Exception as exc:
                 raise RuntimeError(f"Meet kept {label} enabled for BlackHole") from exc
 
+        await self._close_settings_dialog(timeout_ms)
+
+    async def _close_settings_dialog(self, timeout_ms: int) -> None:
         close = self.page.locator(
-            'button[aria-label="Close dialog"], button[aria-label="Close dialogue"]'
+            'button[aria-label="Close"], '
+            'button[aria-label="Close dialog"], '
+            'button[aria-label="Close dialogue"]'
         )
         for index in range(await close.count()):
-            if await close.nth(index).is_visible():
-                await close.nth(index).click(force=True, timeout=timeout_ms)
+            candidate = close.nth(index)
+            if await candidate.is_visible():
+                await candidate.click(force=True, timeout=timeout_ms)
+                break
+        dialog = self.page.locator('[role="dialog"]:has-text("Settings")')
+        if await dialog.count():
+            try:
+                await dialog.first.wait_for(
+                    state="hidden", timeout=min(max(timeout_ms, 250), 2_000)
+                )
+            except Exception as exc:
+                await self.page.keyboard.press("Escape")
                 try:
-                    await close.nth(index).wait_for(
+                    await dialog.first.wait_for(
                         state="hidden", timeout=min(max(timeout_ms, 250), 2_000)
                     )
-                except Exception as exc:
+                except Exception:
                     raise RuntimeError("Meet audio settings dialog did not close") from exc
-                break
 
     async def screenshot(self) -> bytes:
         return await self.page.screenshot(full_page=True)

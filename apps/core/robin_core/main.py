@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -34,10 +35,19 @@ from .schemas import (
 
 runtime = RobinRuntime()
 
+
+def _cors_origins() -> list[str]:
+    origins = {"http://127.0.0.1:3000", "http://localhost:3000"}
+    parsed = urlparse(runtime.settings.presentation.base_url)
+    if parsed.scheme and parsed.netloc:
+        origins.add(f"{parsed.scheme}://{parsed.netloc}")
+    return sorted(origins)
+
+
 app = FastAPI(title="Robin Core", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:3000", "http://localhost:3000"],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -169,7 +169,7 @@ class GeneralTaskAgent:
                         model=self.settings.model.primary,
                         iterations=iteration,
                         tool_calls=tool_history,
-                        source_paths=sorted(read_paths),
+                        source_paths=sorted(path for path in read_paths if path in allowed),
                         generated_paths=sorted(generated_paths),
                     )
                 result = self._run_tool(
@@ -232,11 +232,14 @@ class GeneralTaskAgent:
             }
         if name == "read_workspace_file":
             path = str(arguments.get("path", ""))
-            if path not in allowed:
+            if path in allowed:
+                result = self.workspace.read_source(
+                    path, max_chars=self.settings.model.agent_max_source_chars
+                )
+            elif path in generated_paths:
+                result = self._read_generated_file(path)
+            else:
                 raise WorkspaceViolation(f"Model requested an unapproved path: {path}")
-            result = self.workspace.read_source(
-                path, max_chars=self.settings.model.agent_max_source_chars
-            )
             read_paths.add(path)
             return {"paths": [path], "file": result}
         if name == "write_generated_file":
@@ -252,6 +255,25 @@ class GeneralTaskAgent:
                 "bytes": len(str(arguments.get("content", "")).encode("utf-8")),
             }
         raise AgentExecutionError(f"Unknown agent tool: {name}")
+
+    def _read_generated_file(self, relative_path: str) -> dict[str, Any]:
+        path = self.workspace.resolve(relative_path)
+        if not path.is_relative_to(self.workspace.generated.resolve()) or not path.is_file():
+            raise WorkspaceViolation(f"Not an approved generated file: {relative_path}")
+        if path.suffix.lower() not in self.workspace.GENERATED_TEXT_EXTENSIONS:
+            raise WorkspaceViolation(f"Unsupported generated file type: {path.suffix}")
+        content = path.read_text(encoding="utf-8", errors="replace")
+        return {
+            "path": relative_path,
+            "generated_content": True,
+            "sections": [
+                {
+                    "location": "document",
+                    "text": content[: self.settings.model.agent_max_source_chars],
+                }
+            ],
+            "truncated": len(content) > self.settings.model.agent_max_source_chars,
+        }
 
     @staticmethod
     def _audit_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]:

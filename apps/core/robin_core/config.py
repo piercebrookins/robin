@@ -164,6 +164,8 @@ class WorkspaceConfig(BaseModel):
 class PresentationConfig(BaseModel):
     base_url: str = "http://127.0.0.1:3000/present"
     default_slide_count: int = 4
+    narration_prefetch_enabled: bool = True
+    narration_prefetch_concurrency: int = 2
 
 
 class DatabaseConfig(BaseModel):

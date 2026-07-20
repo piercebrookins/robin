@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from robin_core.agent import GeneralTaskAgent
+from robin_core.agent import AgentExecutionError, GeneralTaskAgent
 from robin_core.artifacts import ArtifactWorker
 from robin_core.config import DatabaseConfig, ModelConfig, Settings, WorkspaceConfig
 from robin_core.schemas import RobinTask, TranscriptSegment
@@ -291,6 +291,115 @@ async def test_general_agent_creates_and_revises_scoped_generated_file(tmp_path:
     ).write_agent_result(task, result)
     assert validation.ok
     assert any(artifact.type == "generated_file" and artifact.path == expected for artifact in artifacts)
+
+
+@pytest.mark.asyncio
+async def test_general_agent_can_read_scoped_generated_file_after_writing(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    source = root / "source-data"
+    source.mkdir(parents=True)
+    (source / "notes.txt").write_text("Launch is ready after accessibility review.")
+    settings = Settings(openai_api_key="test-key", workspace=WorkspaceConfig(root=root))
+    workspace = Workspace(settings.workspace)
+    task = RobinTask(
+        meeting_id=uuid4(),
+        title="Meeting notes",
+        request_text="Create concise meeting notes.",
+        requested_outcome="Create concise meeting notes.",
+    )
+    deliverable = {
+        "title": "Meeting notes",
+        "summary": "Accessibility review remains open.",
+        "slides": [
+            {"type": "title", "title": "Meeting notes", "body": ["Launch review"]},
+            {"type": "findings", "title": "Open item", "body": ["Accessibility review"]},
+            {"type": "sources", "title": "Sources", "body": ["notes.txt"]},
+        ],
+        "sources": [
+            {"label": "notes.txt", "path": "source-data/notes.txt", "note": "Launch notes"}
+        ],
+    }
+    generated_path = f"generated/{task.id}/data_availability.md"
+    fake = FakeClient(
+        [
+            [
+                function_call(
+                    "write_generated_file",
+                    "write",
+                    {"name": "data_availability.md", "content": "# Availability\n\nNotes read."},
+                )
+            ],
+            [function_call("read_workspace_file", "read-generated", {"path": generated_path})],
+            [function_call("read_workspace_file", "read-source", {"path": "source-data/notes.txt"})],
+            [function_call("create_deliverable", "finish", deliverable)],
+        ]
+    )
+    agent = GeneralTaskAgent(settings, workspace)
+    agent.client = fake  # type: ignore[assignment]
+
+    result = await agent.execute(task, workspace.index())
+
+    assert generated_path in result.generated_paths
+    assert generated_path not in result.source_paths
+    assert result.source_paths == ["source-data/notes.txt"]
+
+
+@pytest.mark.asyncio
+async def test_general_agent_rejects_generated_file_as_final_citation(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    source = root / "source-data"
+    source.mkdir(parents=True)
+    (source / "notes.txt").write_text("Launch is ready after accessibility review.")
+    settings = Settings(
+        openai_api_key="test-key",
+        model=ModelConfig(agent_max_iterations=3),
+        workspace=WorkspaceConfig(root=root),
+    )
+    workspace = Workspace(settings.workspace)
+    task = RobinTask(
+        meeting_id=uuid4(),
+        title="Meeting notes",
+        request_text="Create concise meeting notes.",
+        requested_outcome="Create concise meeting notes.",
+    )
+    generated_path = f"generated/{task.id}/data_availability.md"
+    deliverable = {
+        "title": "Meeting notes",
+        "summary": "Accessibility review remains open.",
+        "slides": [
+            {"type": "title", "title": "Meeting notes", "body": ["Launch review"]},
+            {"type": "findings", "title": "Open item", "body": ["Accessibility review"]},
+            {"type": "sources", "title": "Sources", "body": ["generated note"]},
+        ],
+        "sources": [
+            {"label": "generated note", "path": generated_path, "note": "Scratch note"}
+        ],
+    }
+    fake = FakeClient(
+        [
+            [
+                function_call(
+                    "write_generated_file",
+                    "write",
+                    {"name": "data_availability.md", "content": "# Availability\n\nNotes read."},
+                )
+            ],
+            [function_call("read_workspace_file", "read-generated", {"path": generated_path})],
+            [function_call("create_deliverable", "finish", deliverable)],
+        ]
+    )
+    agent = GeneralTaskAgent(settings, workspace)
+    agent.client = fake  # type: ignore[assignment]
+    revisions: list[str] = []
+
+    async def progress(kind: str, payload: dict) -> None:
+        if kind == "agent.deliverable.revision_requested":
+            revisions.append(str(payload.get("error", "")))
+
+    with pytest.raises(AgentExecutionError, match="exceeded 3 iterations"):
+        await agent.execute(task, workspace.index(), progress=progress)
+
+    assert any("unapproved sources" in error for error in revisions)
 
 
 @pytest.mark.parametrize("name", ["../escape.md", "script.sh", "/tmp/escape.txt"])

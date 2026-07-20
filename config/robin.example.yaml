@@ -89,6 +89,8 @@ workspace:
 presentation:
   base_url: "http://127.0.0.1:3000/present"
   default_slide_count: 4
+  narration_prefetch_enabled: true
+  narration_prefetch_concurrency: 2
 
 database:
   path: "./RobinWorkspace/robin.db"
