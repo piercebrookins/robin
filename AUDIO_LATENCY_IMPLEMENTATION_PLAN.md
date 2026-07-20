@@ -442,3 +442,33 @@ Capture:
 - Failure and cancellation always restore the muted state.
 - No prefetch task or partial audio file survives cleanup.
 - Three consecutive real-Meet rehearsals receive participant-side confirmation that the presentation was visible and every narration segment was audible.
+
+## 7. Implementation evidence
+
+Implemented on branch `codex/audio-latency` in worktree `/Users/vasu/code/robin-audio-latency`.
+
+### Commits
+
+- `7f22125` Add audio latency instrumentation.
+- `456c50d` Cache Meet speech route for deck narration.
+- `9b07284` Split speech synthesis from playback.
+- `064e755` Prefetch presentation narration with bounded concurrency.
+
+### Automated verification
+
+- `make test`: passed after installing workspace JavaScript dependencies with `pnpm install`.
+  - Python: 151 passed, 5 warnings.
+  - Web: 1 passed.
+- `make smoke-retry-present`: passed.
+- `make smoke-conversation-revision`: passed.
+- Focused audio latency suite passed:
+  - `apps/core/tests/test_google_meet_adapter.py`
+  - `apps/core/tests/test_audio_prefetch.py`
+  - `apps/core/tests/test_audio_bridge.py`
+  - `apps/core/tests/test_runtime.py`
+
+### Environment-gated verification
+
+- `make smoke-audio`: not completed in this shell because `OPENAI_API_KEY` is unset while `config/robin.example.yaml` uses `audio.mode=openai`.
+- `make smoke-audio-live`: not completed for the same missing `OPENAI_API_KEY` prerequisite.
+- Three real-Meet rehearsals were not run from this coding environment; they still require a configured OpenAI key, native bridge, BlackHole route, browser profile, and participant-side confirmation.
