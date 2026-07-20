@@ -1346,6 +1346,7 @@ class RobinRuntime:
                 concurrency=self.settings.presentation.narration_prefetch_concurrency,
             )
             prefetch.start()
+            await asyncio.sleep(0)
             await self.emit_event(
                 "presentation.narration.prefetch_started",
                 {

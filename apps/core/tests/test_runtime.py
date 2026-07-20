@@ -533,6 +533,20 @@ async def test_stop_presenting_deactivates_presentation_session(tmp_path: Path) 
     unmute_before = page.clicked.count("unmute_button")
     mute_before = page.clicked.count("mute_button")
     route_events_before = len(runtime.meet.speech_route_events or [])
+    prefetch_started = asyncio.Event()
+    original_prepare = runtime.audio.prepare_speech
+    original_start_presenting = runtime.meet.start_presenting
+
+    async def prepare_and_signal(text: str):
+        prefetch_started.set()
+        return await original_prepare(text)
+
+    async def start_presenting_after_prefetch_started(url: str) -> None:
+        assert prefetch_started.is_set()
+        await original_start_presenting(url)
+
+    runtime.audio.prepare_speech = prepare_and_signal  # type: ignore[method-assign]
+    runtime.meet.start_presenting = start_presenting_after_prefetch_started  # type: ignore[method-assign]
 
     await runtime.present_task(task.id)
     stopped = await runtime.stop_presenting(task.id)
@@ -641,6 +655,43 @@ async def test_prefetch_failure_falls_back_and_later_slides_stay_prepared(
         for event in runtime.recent_events(200)
     )
     assert not (runtime.audio.output_dir / "partial.wav").exists()
+
+
+@pytest.mark.asyncio
+async def test_disabled_prefetch_uses_streaming_narration_path(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+            presentation=PresentationConfig(
+                base_url="http://127.0.0.1:3000/present",
+                narration_prefetch_enabled=False,
+            ),
+        )
+    )
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    task_id = uuid4()
+    runtime.presentations[task_id] = PresentationSession(
+        task_id=task_id,
+        active=True,
+        slide_count=1,
+    )
+    deck = DeckSpec(
+        task_id=task_id,
+        revision=1,
+        title="Streaming deck",
+        slides=[SlideSpec(type="title", title="One", body=["First"])],
+        sources=[],
+    )
+
+    await runtime._narrate_deck(task_id, deck, ["streaming narration"], prefetch=None)
+
+    assert runtime.speech[-1].source == "streamed"
+    assert not any(
+        event.type == "presentation.narration.prefetch_started"
+        for event in runtime.recent_events(100)
+    )
 
 
 @pytest.mark.asyncio
