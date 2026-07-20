@@ -14,6 +14,24 @@ from robin_core.config import BrowserConfig
 CommandRunner = Callable[[list[str]], Awaitable[str]]
 
 
+def computer_use_permissions_granted(output: str) -> bool:
+    """Accept current JSON and legacy human-readable cua-driver output."""
+
+    start = output.find("{")
+    if start >= 0:
+        try:
+            payload = json.loads(output[start:])
+        except json.JSONDecodeError:
+            pass
+        else:
+            return payload.get("accessibility") is True and payload.get("screen_recording") is True
+    lowered = output.casefold()
+    return bool(
+        re.search(r"accessibility\s*:\s*(?:granted|true)\b", lowered)
+        and re.search(r"screen recording\s*:\s*(?:granted|true)\b", lowered)
+    )
+
+
 @dataclass
 class ShareDialogEvent:
     action: str
@@ -81,7 +99,10 @@ class CuaDriverShareDialogController:
                 await self._ensure_permissions(attempt)
                 pid = await self._resolve_chrome_pid(attempt)
                 window_id, tree = await self._wait_for_picker(pid, attempt)
-                source_indices = self._find_indices(tree, source_title, actionable_only=True)
+                picker_tree = self._picker_window_subtree(tree)
+                source_indices = self._find_indices(
+                    picker_tree, source_title, actionable_only=True
+                )
                 if not source_indices:
                     raise RuntimeError(f"share source titled {source_title!r} was not found")
                 if len(source_indices) != 1:
@@ -96,7 +117,9 @@ class CuaDriverShareDialogController:
                 selected_tree, selected_shot = await self._snapshot(
                     pid, window_id, attempt, "selected"
                 )
-                share_index = self._find_share_button(selected_tree)
+                share_index = self._find_share_button(
+                    self._picker_window_subtree(selected_tree)
+                )
                 if share_index is None:
                     raise RuntimeError("enabled Share button was not found after source selection")
                 await self._click(pid, window_id, share_index)
@@ -152,11 +175,10 @@ class CuaDriverShareDialogController:
         output = await self.runner(
             [self.config.computer_use_command, "check_permissions", '{"prompt":false}']
         )
-        lowered = output.lower()
-        if "accessibility" not in lowered or "granted" not in lowered:
-            raise RuntimeError("computer-use Accessibility permission is not granted")
-        if "screen recording" not in lowered or "granted" not in lowered:
-            raise RuntimeError("computer-use Screen Recording permission is not granted")
+        if not computer_use_permissions_granted(output):
+            raise RuntimeError(
+                "computer-use Accessibility or Screen Recording permission is not granted"
+            )
         self._record("permissions", attempt, True, "Accessibility and Screen Recording granted")
 
     async def _resolve_chrome_pid(self, attempt: int) -> int:
@@ -274,7 +296,7 @@ class CuaDriverShareDialogController:
     async def _cancel_picker(self, pid: int, window_id: int, attempt: int) -> None:
         try:
             tree = await self._ax_tree(pid, window_id)
-            cancel_index = self._find_cancel_button(tree)
+            cancel_index = self._find_cancel_button(self._picker_window_subtree(tree))
             if cancel_index is None:
                 self._record("cancel_picker", attempt, False, "enabled Cancel button not found")
                 return
@@ -310,6 +332,23 @@ class CuaDriverShareDialogController:
     def _picker_present(cls, tree: str) -> bool:
         lowered = tree.lower()
         return any(marker.lower() in lowered for marker in cls.picker_markers)
+
+    @classmethod
+    def _picker_window_subtree(cls, tree: str) -> str:
+        """Return one picker window when CuaDriver mirrors it in the app tree."""
+
+        lines = tree.splitlines()
+        top_level = re.compile(r"^- \[\d+\] AX(?:Window|MenuBar)\b")
+        for start, line in enumerate(lines):
+            if not re.match(r"^- \[\d+\] AXWindow\b", line):
+                continue
+            end = start + 1
+            while end < len(lines) and not top_level.match(lines[end]):
+                end += 1
+            candidate = "\n".join(lines[start:end])
+            if cls._picker_present(candidate):
+                return candidate
+        return tree
 
     @staticmethod
     def _find_indices(tree: str, label: str, actionable_only: bool = False) -> list[int]:

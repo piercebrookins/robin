@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from .browser.native_dialog import computer_use_permissions_granted
 from .config import Settings
 from .schemas import HealthItem
 
@@ -91,13 +92,8 @@ def _computer_use_check(settings: Settings) -> HealthItem:
         )
     except Exception as exc:
         return HealthItem(name="computer_use", ok=False, detail=f"permission check failed: {exc}")
-    output = f"{completed.stdout}\n{completed.stderr}".lower()
-    granted = (
-        completed.returncode == 0
-        and "accessibility" in output
-        and "screen recording" in output
-        and output.count("granted") >= 2
-    )
+    output = f"{completed.stdout}\n{completed.stderr}"
+    granted = completed.returncode == 0 and computer_use_permissions_granted(output)
     return HealthItem(
         name="computer_use",
         ok=granted,
