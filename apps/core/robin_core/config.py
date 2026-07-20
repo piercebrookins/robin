@@ -5,13 +5,14 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 load_dotenv()
 
 
 class RuntimeConfig(BaseModel):
+    deployment_mode: str = "simulator"
     environment: str = "development"
     log_level: str = "INFO"
     max_concurrent_tasks: int = 2
@@ -88,6 +89,65 @@ class AudioConfig(BaseModel):
     simulator_transcript: str = (
         "Robin, use the finance files to compare the quarterly results and make slides."
     )
+    capture: "AudioCaptureConfig" = Field(default_factory=lambda: AudioCaptureConfig())
+    transcription: "AudioTranscriptionConfig" = Field(default_factory=lambda: AudioTranscriptionConfig())
+    speech: "AudioSpeechConfig" = Field(default_factory=lambda: AudioSpeechConfig())
+    bridge: "AudioBridgeConfig" = Field(default_factory=lambda: AudioBridgeConfig())
+    routing: "AudioRoutingConfig" = Field(default_factory=lambda: AudioRoutingConfig())
+
+    @model_validator(mode="after")
+    def sync_legacy_defaults(self) -> "AudioConfig":
+        if self.capture.provider == "fixture" and self.mode != "simulator":
+            self.capture = AudioCaptureConfig(
+                provider="fixture", bundle_id=self.capture.bundle_id, sample_rate=self.capture.sample_rate,
+                channels=self.capture.channels, encoding=self.capture.encoding,
+                frame_duration_ms=self.capture.frame_duration_ms,
+            )
+        if self.transcription.provider == "fixture" and self.simulator_transcript:
+            self.transcription.fixture_transcript = self.simulator_transcript
+        return self
+
+
+class AudioCaptureConfig(BaseModel):
+    provider: str = "fixture"
+    bundle_id: str = "com.google.Chrome"
+    sample_rate: int = 24_000
+    channels: int = 1
+    encoding: str = "pcm_s16le"
+    frame_duration_ms: int = 100
+    sample_duration_ms: int = 1_500
+    loop_interval_ms: int = 500
+
+
+class AudioTranscriptionConfig(BaseModel):
+    provider: str = "fixture"
+    model: str = "gpt-realtime-whisper"
+    language: str = "en"
+    fixture_transcript: str = ""
+    vad_threshold: float = 0.5
+    prefix_padding_ms: int = 300
+    silence_duration_ms: int = 500
+
+
+class AudioSpeechConfig(BaseModel):
+    provider: str = "tone_fixture"
+    model: str = "gpt-4o-mini-tts"
+    voice: str = "alloy"
+    response_format: str = "pcm"
+    cooldown_ms: int = 700
+
+
+class AudioBridgeConfig(BaseModel):
+    provider: str = "simulator"
+    executable: Path | None = None
+
+
+class AudioRoutingConfig(BaseModel):
+    tts_output_device_uid: str | None = None
+    meet_microphone_label: str = "Robin Microphone"
+    meet_speaker_label: str = "Robin Speaker"
+    allow_default_output_fallback: bool = True
+    legacy_output_device_name: str = "BlackHole 2ch"
 
 
 class WorkspaceConfig(BaseModel):
@@ -129,6 +189,26 @@ class Settings(BaseModel):
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     calendar: CalendarConfig = Field(default_factory=CalendarConfig)
     openai_api_key: str | None = None
+
+    @model_validator(mode="after")
+    def validate_audio_contract(self) -> "Settings":
+        if self.runtime.deployment_mode not in {"simulator", "real"}:
+            raise ValueError("runtime.deployment_mode must be 'simulator' or 'real'")
+        if self.runtime.deployment_mode != "real":
+            return self
+        if self.audio.capture.provider != "screen_capture_kit":
+            raise ValueError("real deployment requires audio.capture.provider=screen_capture_kit")
+        if self.audio.transcription.provider != "openai_realtime":
+            raise ValueError("real deployment requires audio.transcription.provider=openai_realtime")
+        if self.audio.speech.provider != "openai":
+            raise ValueError("real deployment requires audio.speech.provider=openai")
+        if self.audio.bridge.provider != "process" or not self.audio.bridge.executable:
+            raise ValueError("real deployment requires audio.bridge.provider=process and an executable")
+        if not self.audio.routing.tts_output_device_uid:
+            raise ValueError("real deployment requires audio.routing.tts_output_device_uid")
+        if self.audio.routing.allow_default_output_fallback:
+            raise ValueError("real deployment forbids default output fallback")
+        return self
 
 
 def load_settings() -> Settings:

@@ -59,10 +59,11 @@ async def shutdown() -> None:
 @app.get("/health")
 async def health() -> dict:
     runtime.refresh_health()
+    health_items = [item.model_dump(mode="json") for item in runtime.health]
     return {
-        "ok": True,
+        "ok": all(item["ok"] for item in health_items),
         "state": runtime.runtime_state,
-        "health": [item.model_dump(mode="json") for item in runtime.health],
+        "health": health_items,
     }
 
 

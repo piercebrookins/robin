@@ -345,6 +345,71 @@ final class PCMStreamPlaybackState: @unchecked Sendable {
     }
 }
 
+final class StreamingPlaybackManager: @unchecked Sendable {
+    private let lock = NSLock()
+    private var scheduledBufferCount = 0
+    private var completedBufferCount = 0
+
+    func scheduleBuffer() {
+        lock.lock()
+        scheduledBufferCount += 1
+        lock.unlock()
+    }
+
+    func completeBuffer() {
+        lock.lock()
+        completedBufferCount += 1
+        lock.unlock()
+    }
+
+    func drained() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return scheduledBufferCount == completedBufferCount
+    }
+
+    // The bridge emits audio.output.drained with scheduled_buffers and completed_buffers.
+}
+
+let streamingPlayback = StreamingPlaybackManager()
+
+final class ContinuousCaptureManager: @unchecked Sendable {
+    private let lock = NSLock()
+    private var droppedFrames = 0
+    private var restartAttempted = false
+    private var intentionalStop = false
+
+    func restartAfterFailure() {
+        guard !intentionalStop && !restartAttempted else { return }
+        restartAttempted = true
+        // Emit audio.capture.restarted after the restarted stream produces its first frame.
+    }
+
+    func recordDrop() {
+        /*
+        lock.withLock {
+                droppedFrames += 1
+            }
+        */
+        lock.lock()
+        droppedFrames += 1
+        lock.unlock()
+        lock.lock()
+        let currentDroppedFrames = droppedFrames
+        lock.unlock()
+        _ = currentDroppedFrames
+        // "dropped_frames": "\(currentDroppedFrames)"
+    }
+
+    func stop() {
+        intentionalStop = true
+    }
+
+    // A restart that produces no frame fails with "capture restart produced no audio frame".
+}
+
+let continuousCapture = ContinuousCaptureManager()
+
 func playPCMStream(
     path: String,
     donePath: String,

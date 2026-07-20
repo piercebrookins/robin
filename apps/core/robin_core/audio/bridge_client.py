@@ -31,6 +31,15 @@ class BridgeResponse(BaseModel):
     error: str | None = None
 
 
+class AudioDeviceInfo(BaseModel):
+    id: int | str
+    uid: str
+    name: str
+    input_channels: int = 0
+    output_channels: int = 0
+    sample_rate: int = 0
+
+
 class PlaybackInterrupted(RuntimeError):
     pass
 
