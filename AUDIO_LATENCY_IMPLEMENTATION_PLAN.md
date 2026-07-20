@@ -453,8 +453,13 @@ Implemented on branch `codex/audio-latency` in worktree `/Users/vasu/code/robin-
 - `456c50d` Cache Meet speech route for deck narration.
 - `9b07284` Split speech synthesis from playback.
 - `064e755` Prefetch presentation narration with bounded concurrency.
+- `824fb51` Record audio latency verification evidence.
 - `f325ab3` Ensure narration prefetch starts before sharing.
+- `99d22d5` Refresh audio latency verification evidence.
 - `a99e660` Cover deck narration failure cleanup.
+- `99d8b3b` Update audio latency verification counts.
+- `52bac66` Record passing live audio smokes.
+- `72d4998` Harden real Meet presentation smoke.
 
 ### Automated verification
 
@@ -480,5 +485,10 @@ Implemented on branch `codex/audio-latency` in worktree `/Users/vasu/code/robin-
 
 ### Environment-gated verification
 
-- `make smoke-real-meet` was not run because `ROBIN_REAL_MEET_URL` is not set.
-- Three real-Meet rehearsals were not run from this coding environment; they still require a live Google Meet URL and participant-side confirmation that the presentation was visible and every narration segment was audible.
+- User provided `ROBIN_REAL_MEET_URL=https://meet.google.com/qua-mqej-nwp`.
+- The feature worktree did not initially have a populated `RobinWorkspace/source-data`, so the main-branch workspace source files were copied from `/Users/vasu/code/robin/RobinWorkspace/source-data` into `/Users/vasu/code/robin-audio-latency/RobinWorkspace/source-data` and reindexed.
+- `make smoke-real-meet` now generates and validates grounded decks against the copied workspace files, including task `759499cd-53d3-4df0-891b-9d601c25c4b1`.
+- Real-Meet presentation rendering was verified on the worktree web app at `http://127.0.0.1:3001`; CORS now derives the allowed origin from `presentation.base_url`.
+- The live Meet flow advanced past microphone selection, BlackHole processing checks, settings-dialog cleanup, deck renderer readiness, and the Meet present button.
+- The remaining blocker is macOS Accessibility permission for native Chrome share-picker automation: `Chrome share picker automation failed: computer-use Accessibility permission is not granted`.
+- Three real-Meet rehearsals remain pending until Accessibility permission is granted and a participant confirms that the presentation is visible and every narration segment is audible.
