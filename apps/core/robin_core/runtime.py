@@ -9,7 +9,7 @@ import sys
 import time
 from difflib import SequenceMatcher
 from pathlib import Path
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
@@ -1238,7 +1238,13 @@ class RobinRuntime:
 
     def _should_accept_barge_in(self, text: str) -> bool:
         return (
-            self.meeting_state == MeetingState.SPEAKING
+            (
+                self.meeting_state == MeetingState.SPEAKING
+                or (
+                    self.meeting_state == MeetingState.PRESENTING
+                    and self._active_spoken_text is not None
+                )
+            )
             and self._contains_wake_word(text)
             and not self._is_recent_robin_echo(text)
         )
@@ -1458,41 +1464,46 @@ class RobinRuntime:
         return DeckSpec.model_validate_json(self.workspace.resolve(deck.path).read_text())
 
     async def _narrate_deck(self, task_id: UUID, deck: DeckSpec) -> None:
-        for index, slide in enumerate(deck.slides):
-            slide_started = time.perf_counter()
-            await self.emit_event(
-                "presentation.slide.started",
-                {"slide_index": index, "title": slide.title[:160]},
-                task_id=task_id,
-                component="presentation",
-            )
-            await self.navigate_presentation(task_id, "goto", index=index)
-            speech = self._slide_narration(deck, index)
-            await self.emit_event(
-                "presentation.narration",
-                {"slide": index, "speech": speech[:240]},
-                task_id=task_id,
-                component="presentation",
-            )
-            record = await self._acknowledge(speech, task_id=task_id, slide_index=index)
-            await self.emit_event(
-                "presentation.slide.completed",
-                {
-                    "slide_index": index,
-                    "duration_ms": int((time.perf_counter() - slide_started) * 1000),
-                    "interrupted": record.interrupted,
-                },
-                task_id=task_id,
-                component="presentation",
-            )
-            if record.interrupted:
+        async with self._presentation_speech_session(task_id):
+            for index, slide in enumerate(deck.slides):
+                slide_started = time.perf_counter()
                 await self.emit_event(
-                    "presentation.narration.interrupted",
-                    {"slide": index},
+                    "presentation.slide.started",
+                    {"slide_index": index, "title": slide.title[:160]},
                     task_id=task_id,
                     component="presentation",
                 )
-                break
+                await self.navigate_presentation(task_id, "goto", index=index)
+                speech = self._slide_narration(deck, index)
+                await self.emit_event(
+                    "presentation.narration",
+                    {"slide": index, "speech": speech[:240]},
+                    task_id=task_id,
+                    component="presentation",
+                )
+                record = await self._speak_during_session(
+                    speech,
+                    task_id=task_id,
+                    slide_index=index,
+                )
+                await self.emit_event(
+                    "presentation.slide.completed",
+                    {
+                        "slide_index": index,
+                        "duration_ms": int((time.perf_counter() - slide_started) * 1000),
+                        "interrupted": record.interrupted,
+                    },
+                    task_id=task_id,
+                    component="presentation",
+                )
+                if record.interrupted:
+                    await self.emit_event(
+                        "presentation.narration.interrupted",
+                        {"slide": index},
+                        task_id=task_id,
+                        component="presentation",
+                    )
+                    break
 
     def _slide_narration(self, deck: DeckSpec, index: int) -> str:
         slide = deck.slides[index]
@@ -2046,28 +2057,40 @@ class RobinRuntime:
             )
             await self.publish()
 
-    async def _acknowledge(
-        self,
-        text: str,
-        *,
-        task_id: UUID | None = None,
-        slide_index: int | None = None,
-    ) -> SpeechRecord:
+    @asynccontextmanager
+    async def _presentation_speech_session(self, task_id: UUID | None = None):
+        async with self._speech_lock:
+            previous = self.meeting_state
+            await self._wait_for_speech_floor("presentation narration")
+            await self.meet.unmute()
+            await self._emit_meet_recovery_events(task_id)
+            await self._emit_meet_speech_route_events(task_id)
+            self.meeting_state = MeetingState.PRESENTING
+            await self.publish()
+            try:
+                yield
+            finally:
+                self._last_spoken_at_ms = int(time.time() * 1000)
+                try:
+                    await self.meet.mute()
+                    await self._emit_meet_recovery_events(task_id)
+                finally:
+                    self._active_spoken_text = None
+                    self.meeting_state = previous if previous != MeetingState.IDLE else self.meet.state
+                    await self.publish()
+
+    @asynccontextmanager
+    async def _isolated_speech_session(self, text: str):
         async with self._speech_lock:
             previous = self.meeting_state
             await self._wait_for_speech_floor(text)
+            await self.meet.unmute()
+            await self._emit_meet_recovery_events()
+            await self._emit_meet_speech_route_events()
             self.meeting_state = MeetingState.SPEAKING
-            self._active_spoken_text = text
             await self.publish()
             try:
-                await self.meet.unmute()
-                await self._emit_meet_recovery_events()
-                await self._emit_meet_speech_route_events()
-                return await self._speak_and_record(
-                    text,
-                    task_id=task_id,
-                    slide_index=slide_index,
-                )
+                yield
             finally:
                 self._last_spoken_at_ms = int(time.time() * 1000)
                 try:
@@ -2079,6 +2102,39 @@ class RobinRuntime:
                         previous if previous != MeetingState.IDLE else self.meet.state
                     )
                     await self.publish()
+
+    async def _speak_during_session(
+        self,
+        text: str,
+        *,
+        task_id: UUID | None = None,
+        slide_index: int | None = None,
+    ) -> SpeechRecord:
+        self._active_spoken_text = text
+        await self.publish()
+        try:
+            return await self._speak_and_record(
+                text,
+                task_id=task_id,
+                slide_index=slide_index,
+            )
+        finally:
+            self._active_spoken_text = None
+            await self.publish()
+
+    async def _acknowledge(
+        self,
+        text: str,
+        *,
+        task_id: UUID | None = None,
+        slide_index: int | None = None,
+    ) -> SpeechRecord:
+        async with self._isolated_speech_session(text):
+            return await self._speak_during_session(
+                text,
+                task_id=task_id,
+                slide_index=slide_index,
+            )
 
     async def _speak_and_record(
         self,

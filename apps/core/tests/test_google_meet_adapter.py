@@ -55,6 +55,65 @@ async def test_google_meet_microphone_actions_follow_visible_control_state() -> 
 
 
 @pytest.mark.asyncio
+async def test_google_meet_speech_route_is_cached_until_invalidated() -> None:
+    config = BrowserConfig(automation_mode="simulator")
+    adapter = GoogleMeetAdapter(BrowserController(config), config)
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    await adapter.join()
+    page = adapter.meet_page
+    assert isinstance(page, SimulatedPageDriver)
+
+    selected = await adapter.prepare_speech_route()
+    await adapter.prepare_speech_route()
+    adapter.invalidate_speech_route()
+    await adapter.prepare_speech_route()
+
+    assert selected == "BlackHole 2ch (Virtual)"
+    assert adapter.speech_route_ready is True
+    completed = [
+        event
+        for event in adapter.speech_route_events or []
+        if event.type == "speech.route_prepare.completed"
+    ]
+    assert [event.cache_status for event in completed[-3:]] == ["miss", "hit", "miss"]
+
+
+@pytest.mark.asyncio
+async def test_google_meet_failed_route_prepare_is_not_cached() -> None:
+    config = BrowserConfig(automation_mode="simulator")
+    adapter = GoogleMeetAdapter(BrowserController(config), config)
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    await adapter.join()
+    adapter.microphone_device_name = "Missing Virtual Microphone"
+    adapter.invalidate_speech_route()
+
+    with pytest.raises(RuntimeError, match="microphone device is unavailable"):
+        await adapter.prepare_speech_route()
+
+    assert adapter.speech_route_ready is False
+
+
+@pytest.mark.asyncio
+async def test_google_meet_page_replacement_invalidates_speech_route() -> None:
+    config = BrowserConfig(automation_mode="simulator")
+    adapter = GoogleMeetAdapter(BrowserController(config), config)
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    await adapter.join()
+    await adapter.prepare_speech_route()
+    assert adapter.speech_route_ready is True
+
+    await adapter._recover_admission_target(1, RuntimeError("Target closed"))
+    await adapter.prepare_speech_route()
+
+    completed = [
+        event
+        for event in adapter.speech_route_events or []
+        if event.type == "speech.route_prepare.completed"
+    ]
+    assert completed[-1].cache_status == "miss"
+
+
+@pytest.mark.asyncio
 async def test_google_meet_enables_captions_after_admission() -> None:
     config = BrowserConfig(automation_mode="simulator", captions_enabled=True)
     adapter = GoogleMeetAdapter(BrowserController(config), config)

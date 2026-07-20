@@ -523,6 +523,11 @@ async def test_stop_presenting_deactivates_presentation_session(tmp_path: Path) 
     await runtime._task_handles[task.id]
     slide_count = runtime._deck_slide_count(task.id)
     speech_before = len(runtime.speech)
+    assert isinstance(runtime.meet.meet_page, SimulatedPageDriver)
+    page = runtime.meet.meet_page
+    unmute_before = page.clicked.count("unmute_button")
+    mute_before = page.clicked.count("mute_button")
+    route_events_before = len(runtime.meet.speech_route_events or [])
 
     await runtime.present_task(task.id)
     stopped = await runtime.stop_presenting(task.id)
@@ -530,6 +535,17 @@ async def test_stop_presenting_deactivates_presentation_session(tmp_path: Path) 
     assert stopped.presenting is False
     assert runtime.presentations[task.id].active is False
     assert len(runtime.speech) >= speech_before + slide_count
+    assert page.clicked.count("unmute_button") == unmute_before + 1
+    assert page.clicked.count("mute_button") == mute_before + 1
+    route_events = runtime.meet.speech_route_events or []
+    presentation_route_completions = [
+        event
+        for event in route_events[route_events_before:]
+        if event.type == "speech.route_prepare.completed"
+    ]
+    assert len(presentation_route_completions) == 1
+    assert presentation_route_completions[0].cache_status == "hit"
+    assert runtime.meet.muted is True
     assert any("Revenue increased" in speech.text for speech in runtime.speech)
     assert any("Key metrics:" in speech.text for speech in runtime.speech)
     assert (
