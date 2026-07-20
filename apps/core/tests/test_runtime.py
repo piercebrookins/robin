@@ -29,6 +29,7 @@ from robin_core.schemas import (
     RobinTask,
     RuntimeState,
     SlideSpec,
+    SpeechRecord,
     TaskOutcomeState,
     TaskStatus,
     ValidationReport,
@@ -692,6 +693,139 @@ async def test_disabled_prefetch_uses_streaming_narration_path(tmp_path: Path) -
         event.type == "presentation.narration.prefetch_started"
         for event in runtime.recent_events(100)
     )
+
+
+@pytest.mark.asyncio
+async def test_deck_narration_failure_mutes_microphone(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+        )
+    )
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    task_id = uuid4()
+    runtime.presentations[task_id] = PresentationSession(
+        task_id=task_id,
+        active=True,
+        slide_count=1,
+    )
+    deck = DeckSpec(
+        task_id=task_id,
+        revision=1,
+        title="Failure deck",
+        slides=[SlideSpec(type="title", title="One", body=["First"])],
+        sources=[],
+    )
+
+    async def fail_speech(_text: str) -> SpeechRecord:
+        raise RuntimeError("playback failed")
+
+    runtime.audio.speak = fail_speech  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="playback failed"):
+        await runtime._narrate_deck(task_id, deck, ["failing narration"], prefetch=None)
+
+    assert runtime.meet.muted is True
+
+
+@pytest.mark.asyncio
+async def test_deck_narration_cancellation_mutes_microphone(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+        )
+    )
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    task_id = uuid4()
+    runtime.presentations[task_id] = PresentationSession(
+        task_id=task_id,
+        active=True,
+        slide_count=1,
+    )
+    deck = DeckSpec(
+        task_id=task_id,
+        revision=1,
+        title="Cancellation deck",
+        slides=[SlideSpec(type="title", title="One", body=["First"])],
+        sources=[],
+    )
+    speech_started = asyncio.Event()
+
+    async def hang_speech(_text: str) -> SpeechRecord:
+        speech_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    runtime.audio.speak = hang_speech  # type: ignore[method-assign]
+    handle = asyncio.create_task(
+        runtime._narrate_deck(task_id, deck, ["cancellable narration"], prefetch=None)
+    )
+    await speech_started.wait()
+
+    handle.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await handle
+
+    assert runtime.meet.muted is True
+
+
+@pytest.mark.asyncio
+async def test_interrupted_deck_narration_stops_subsequent_slides(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = RobinRuntime(
+        Settings(
+            workspace=WorkspaceConfig(root=workspace),
+            database=DatabaseConfig(path=workspace / "robin.db"),
+        )
+    )
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    task_id = uuid4()
+    runtime.presentations[task_id] = PresentationSession(
+        task_id=task_id,
+        active=True,
+        slide_count=2,
+    )
+    deck = DeckSpec(
+        task_id=task_id,
+        revision=1,
+        title="Interrupted deck",
+        slides=[
+            SlideSpec(type="title", title="One", body=["First"]),
+            SlideSpec(type="executive_summary", title="Two", body=["Second"]),
+        ],
+        sources=[],
+    )
+
+    async def interrupted_speech(text: str) -> SpeechRecord:
+        return SpeechRecord(
+            text=text,
+            mode="simulator",
+            voice="alloy",
+            model="simulator",
+            format="wav",
+            interrupted=True,
+        )
+
+    runtime.audio.speak = interrupted_speech  # type: ignore[method-assign]
+
+    await runtime._narrate_deck(
+        task_id,
+        deck,
+        ["interrupted narration", "should not play"],
+        prefetch=None,
+    )
+
+    assert [speech.text for speech in runtime.speech[-1:]] == ["interrupted narration"]
+    assert runtime.presentations[task_id].active_slide == 0
+    assert any(
+        event.type == "presentation.narration.interrupted"
+        for event in runtime.recent_events(100)
+    )
+    assert runtime.meet.muted is True
 
 
 @pytest.mark.asyncio
