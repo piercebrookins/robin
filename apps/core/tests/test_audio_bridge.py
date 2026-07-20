@@ -123,6 +123,37 @@ async def test_simulator_speech_writes_wav(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepare_speech_writes_valid_wav_without_record(tmp_path: Path) -> None:
+    bridge = AudioBridge(AudioConfig(mode="simulator"), tmp_path)
+
+    prepared = await bridge.prepare_speech("Prepare this narration.")
+
+    assert prepared.error is None
+    assert prepared.path is not None
+    assert prepared.byte_count > 44
+    assert prepared.duration_seconds == pytest.approx(0.18)
+    assert bridge.last_record is None
+    with wave.open(str(prepared.path), "rb") as wav:
+        assert wav.getframerate() == 24_000
+        assert wav.getnchannels() == 1
+
+
+@pytest.mark.asyncio
+async def test_play_prepared_creates_one_speech_record(tmp_path: Path) -> None:
+    bridge = AudioBridge(AudioConfig(mode="simulator"), tmp_path)
+    prepared = await bridge.prepare_speech("Play the prepared narration.")
+
+    record = await bridge.play_prepared(prepared)
+
+    assert record.text == prepared.text
+    assert record.source == "prefetched"
+    assert prepared.path is not None
+    assert record.path == prepared.path.name
+    assert record.completed_at is not None
+    assert bridge.last_record == record
+
+
+@pytest.mark.asyncio
 async def test_openai_speech_streams_pcm_before_preserving_wav(tmp_path: Path) -> None:
     class FakeStreamingResponse:
         async def __aenter__(self):

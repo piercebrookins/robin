@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import time
 import wave
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from openai import AsyncOpenAI
@@ -10,6 +12,22 @@ from openai import AsyncOpenAI
 from ..config import AudioConfig
 from ..schemas import SpeechRecord, now_utc
 from .bridge_client import BridgeClient, PlaybackInterrupted, create_bridge_client
+
+
+@dataclass
+class PreparedSpeech:
+    text: str
+    path: Path | None
+    model: str
+    voice: str
+    format: str
+    mode: str
+    byte_count: int = 0
+    duration_seconds: float | None = None
+    synthesis_started_at: datetime | None = None
+    synthesis_completed_at: datetime | None = None
+    synthesis_duration_ms: int | None = None
+    error: str | None = None
 
 
 class AudioBridge:
@@ -31,6 +49,92 @@ class AudioBridge:
         self.virtual_mic_healthy = True
         self.last_spoken_text: str | None = None
         self.last_record: SpeechRecord | None = None
+
+    async def prepare_speech(self, text: str) -> PreparedSpeech:
+        record = SpeechRecord(
+            text=text,
+            mode="openai" if self.config.mode == "openai" else "simulator",
+            voice=self.config.speech_voice,
+            model=self.config.speech_model,
+            format=self.config.speech_format,
+        )
+        started = time.perf_counter()
+        started_at = now_utc()
+        path: Path | None = None
+        error: str | None = None
+        try:
+            if self.config.mode == "openai":
+                await self._synthesize_openai(record)
+            else:
+                self._synthesize_simulator(record)
+            if record.path and self.output_dir:
+                path = self.output_dir / record.path
+                if record.format == "wav":
+                    record.duration_seconds = self._wav_duration(path)
+        except Exception as exc:
+            error = str(exc)
+            if record.path and self.output_dir:
+                (self.output_dir / record.path).unlink(missing_ok=True)
+            elif path:
+                path.unlink(missing_ok=True)
+        completed_at = now_utc()
+        return PreparedSpeech(
+            text=text,
+            path=path,
+            model=record.model,
+            voice=record.voice,
+            format=record.format,
+            mode=record.mode,
+            byte_count=record.byte_count,
+            duration_seconds=record.duration_seconds,
+            synthesis_started_at=started_at,
+            synthesis_completed_at=completed_at,
+            synthesis_duration_ms=int((time.perf_counter() - started) * 1000),
+            error=error,
+        )
+
+    async def play_prepared(self, prepared: PreparedSpeech) -> SpeechRecord:
+        if prepared.error:
+            raise RuntimeError(prepared.error)
+        if prepared.path is None:
+            raise RuntimeError("Prepared speech has no audio path.")
+        self.last_spoken_text = prepared.text
+        record = SpeechRecord(
+            text=prepared.text,
+            mode=prepared.mode,  # type: ignore[arg-type]
+            voice=prepared.voice,
+            model=prepared.model,
+            format=prepared.format,
+            path=prepared.path.name,
+            byte_count=prepared.byte_count,
+            duration_seconds=prepared.duration_seconds,
+            synthesis_started_at=prepared.synthesis_started_at,
+            synthesis_completed_at=prepared.synthesis_completed_at,
+            synthesis_duration_ms=prepared.synthesis_duration_ms,
+            source="prefetched",
+        )
+        playback_started = time.perf_counter()
+        record.playback_started_at = now_utc()
+        try:
+            playback = await self.bridge_client.play_audio(prepared.path)
+            record.playback_completed_at = now_utc()
+            record.playback_duration_ms = int((time.perf_counter() - playback_started) * 1000)
+            played = playback.result.get("played", False)
+            if not playback.ok or str(played).lower() not in {"true", "1"}:
+                raise RuntimeError(playback.error or "Audio playback did not start.")
+            record.playback_device = str(playback.result.get("output_device", "")) or None
+            record.playback_route = str(playback.result.get("route", "")) or None
+            record.completed_at = now_utc()
+        except PlaybackInterrupted:
+            record.interrupted = True
+            record.completed_at = now_utc()
+        except Exception as exc:
+            record.error = str(exc)
+            record.completed_at = now_utc()
+            raise
+        finally:
+            self.last_record = record
+        return record
 
     async def speak(self, text: str) -> SpeechRecord:
         self.last_spoken_text = text
