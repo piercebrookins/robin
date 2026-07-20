@@ -453,11 +453,12 @@ Implemented on branch `codex/audio-latency` in worktree `/Users/vasu/code/robin-
 - `456c50d` Cache Meet speech route for deck narration.
 - `9b07284` Split speech synthesis from playback.
 - `064e755` Prefetch presentation narration with bounded concurrency.
+- `f325ab3` Ensure narration prefetch starts before sharing.
 
 ### Automated verification
 
 - `make test`: passed after installing workspace JavaScript dependencies with `pnpm install`.
-  - Python: 151 passed, 5 warnings.
+  - Python: 152 passed, 5 warnings.
   - Web: 1 passed.
 - `make smoke-retry-present`: passed.
 - `make smoke-conversation-revision`: passed.
