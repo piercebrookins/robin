@@ -352,11 +352,14 @@ class PlaywrightPageDriver:
 
         async def selected_label() -> str:
             locator = self.page.locator('button[aria-label^="Microphone:"]')
+            fallback = ""
             for index in range(await locator.count()):
                 label = (await locator.nth(index).get_attribute("aria-label") or "").strip()
-                if label:
+                if label and await locator.nth(index).is_visible():
                     return label.removeprefix("Microphone:").strip()
-            return ""
+                if label and not fallback:
+                    fallback = label.removeprefix("Microphone:").strip()
+            return fallback
 
         current = await selected_label()
         if target in current.casefold():
@@ -364,28 +367,45 @@ class PlaywrightPageDriver:
                 await self._disable_virtual_microphone_processing(timeout_ms)
             return current
 
-        audio_settings = self.page.locator('button[aria-label="Audio settings"]')
-        try:
-            await audio_settings.first.wait_for(state="attached", timeout=timeout_ms)
-        except Exception as exc:
-            raise RuntimeError("Meet audio settings control is unavailable") from exc
-        if (await audio_settings.first.get_attribute("aria-expanded")) != "true":
-            await audio_settings.first.evaluate("element => element.click()")
-
         device_button = self.page.locator('button[aria-label^="Microphone:"]')
+        visible_device_button = None
+        for index in range(await device_button.count()):
+            if await device_button.nth(index).is_visible():
+                visible_device_button = device_button.nth(index)
+                break
+
+        # Meet currently ships both a compact layout where the microphone
+        # picker is visible directly on the prejoin screen and an older layout
+        # where the picker is nested inside an "Audio settings" popover.
+        if visible_device_button is None:
+            audio_settings = self.page.locator('button[aria-label="Audio settings"]')
+            try:
+                await audio_settings.first.wait_for(state="attached", timeout=timeout_ms)
+            except Exception as exc:
+                raise RuntimeError("Meet microphone controls are unavailable") from exc
+            if (await audio_settings.first.get_attribute("aria-expanded")) != "true":
+                await audio_settings.first.evaluate("element => element.click()")
+
         try:
             await device_button.first.wait_for(state="visible", timeout=timeout_ms)
         except Exception as exc:
             raise RuntimeError("Meet microphone picker is unavailable") from exc
+        for index in range(await device_button.count()):
+            if await device_button.nth(index).is_visible():
+                visible_device_button = device_button.nth(index)
+                break
+        if visible_device_button is None:
+            raise RuntimeError("Meet microphone picker is unavailable")
         current = await selected_label()
         if target not in current.casefold():
-            await device_button.first.evaluate("element => element.click()")
+            await visible_device_button.evaluate("element => element.click()")
             options = self.page.locator(
                 '[role="option"], [role="menuitemradio"], [role="menuitem"], [role="radio"]'
             )
             match = None
-            try:
-                await options.first.wait_for(state="attached", timeout=timeout_ms)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + max(timeout_ms, 250) / 1000
+            while loop.time() < deadline and match is None:
                 for index in range(await options.count()):
                     option = options.nth(index)
                     label = " ".join(
@@ -398,8 +418,8 @@ class PlaywrightPageDriver:
                     if target in label.casefold() and await option.is_visible():
                         match = option
                         break
-            except Exception:
-                match = None
+                if match is None:
+                    await self.page.wait_for_timeout(50)
             if match is None:
                 raise RuntimeError(f"Meet microphone device is unavailable: {device_name}")
             await match.evaluate("element => element.click()")
@@ -501,22 +521,27 @@ class PlaywrightPageDriver:
                 and (await audio_settings.first.get_attribute("aria-expanded")) != "true"
             ):
                 await audio_settings.first.evaluate("element => element.click()")
-            settings = self.page.locator('button[aria-label="Settings"]')
-            visible_settings = None
-            for index in range(await settings.count()):
-                if await settings.nth(index).is_visible():
-                    visible_settings = settings.nth(index)
-                    break
-            # Some Meet editions do not expose these processing controls. In
-            # that case device verification is still valid and there is no
-            # processing toggle to enforce.
-            if visible_settings is None:
-                return
-            await visible_settings.evaluate("element => element.click()")
             try:
-                await switches.first.wait_for(state="visible", timeout=timeout_ms)
-            except Exception as exc:
-                raise RuntimeError("Meet audio processing settings did not open") from exc
+                await switches.first.wait_for(
+                    state="visible", timeout=min(max(timeout_ms, 250), 1_000)
+                )
+            except Exception:
+                settings = self.page.locator('button[aria-label="Settings"]')
+                visible_settings = None
+                for index in range(await settings.count()):
+                    if await settings.nth(index).is_visible():
+                        visible_settings = settings.nth(index)
+                        break
+                # Some Meet editions do not expose these processing controls.
+                # In that case device verification is still valid and there
+                # is no processing toggle to enforce.
+                if visible_settings is None:
+                    return
+                await visible_settings.evaluate("element => element.click()")
+                try:
+                    await switches.first.wait_for(state="visible", timeout=timeout_ms)
+                except Exception as exc:
+                    raise RuntimeError("Meet audio processing settings did not open") from exc
 
         for label in ("Studio sound", "Adaptive audio"):
             control = self.page.locator(f'button[role="switch"][aria-label="{label}"]')
@@ -543,18 +568,30 @@ class PlaywrightPageDriver:
         await self._close_settings_dialog(timeout_ms)
 
     async def _close_settings_dialog(self, timeout_ms: int) -> None:
-        close = self.page.locator('button[aria-label="Close"], button[aria-label="Close dialogue"]')
+        close = self.page.locator(
+            'button[aria-label="Close"], '
+            'button[aria-label="Close dialog"], '
+            'button[aria-label="Close dialogue"]'
+        )
         for index in range(await close.count()):
             candidate = close.nth(index)
             if await candidate.is_visible():
-                await candidate.evaluate("element => element.click()")
+                await candidate.click(force=True, timeout=timeout_ms)
                 break
         dialog = self.page.locator('[role="dialog"]:has-text("Settings")')
         if await dialog.count():
             try:
-                await dialog.first.wait_for(state="hidden", timeout=max(timeout_ms, 250))
-            except Exception:
+                await dialog.first.wait_for(
+                    state="hidden", timeout=min(max(timeout_ms, 250), 2_000)
+                )
+            except Exception as exc:
                 await self.page.keyboard.press("Escape")
+                try:
+                    await dialog.first.wait_for(
+                        state="hidden", timeout=min(max(timeout_ms, 250), 2_000)
+                    )
+                except Exception:
+                    raise RuntimeError("Meet audio settings dialog did not close") from exc
 
     async def screenshot(self) -> bytes:
         return await self.page.screenshot(full_page=True)

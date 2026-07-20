@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from robin_core.browser.native_dialog import CuaDriverShareDialogController, ShareDialogError
+from robin_core.browser.native_dialog import (
+    CuaDriverShareDialogController,
+    ShareDialogError,
+    computer_use_permissions_granted,
+)
 from robin_core.config import BrowserConfig
 
 
@@ -78,6 +82,45 @@ def picker_tree(*, share_disabled: bool) -> str:
             '[23] AXButton "Cancel"',
         ]
     )
+
+
+def test_computer_use_permission_parser_accepts_current_json_and_legacy_output() -> None:
+    assert computer_use_permissions_granted(
+        json.dumps({"accessibility": True, "screen_recording": True})
+    )
+    assert computer_use_permissions_granted(
+        "Accessibility: granted\nScreen Recording: granted\n"
+    )
+    assert not computer_use_permissions_granted(
+        json.dumps({"accessibility": True, "screen_recording": False})
+    )
+
+
+def test_picker_window_subtree_removes_cua_driver_mirror() -> None:
+    picker = "\n".join(
+        [
+            '- [1] AXWindow "Meet"',
+            '  - [2] AXStaticText "Choose what to share with meet.google.com"',
+            "  - [17] AXRow (Robin Presentation)",
+            '  - [22] AXButton "Share"',
+            '  - [23] AXButton "Cancel"',
+        ]
+    )
+    mirrored = (
+        f"{picker}\n- [30] AXMenuBar\n"
+        + picker.replace("[1]", "[101]")
+        .replace("[2]", "[102]")
+        .replace("[17]", "[117]")
+        .replace("[22]", "[122]")
+        .replace("[23]", "[123]")
+    )
+
+    scoped = CuaDriverShareDialogController._picker_window_subtree(mirrored)
+
+    assert CuaDriverShareDialogController._find_indices(
+        scoped, "Robin Presentation", actionable_only=True
+    ) == [17]
+    assert CuaDriverShareDialogController._find_share_button(scoped) == 22
 
 
 @pytest.mark.asyncio

@@ -305,6 +305,34 @@ async def test_playwright_driver_selects_and_verifies_meet_microphone() -> None:
 
 
 @pytest.mark.asyncio
+async def test_playwright_driver_selects_microphone_from_direct_prejoin_picker() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(
+            """
+            <button aria-label="Microphone: MacBook Pro Microphone (Built-in)"
+              aria-haspopup="menu" aria-expanded="false"
+              onclick="this.setAttribute('aria-expanded','true'); document.querySelector('#choices').hidden=false">
+              MacBook Pro Microphone (Built-in)
+            </button>
+            <div id="choices" role="menu" hidden>
+              <li role="menuitemradio" aria-checked="true">MacBook Pro Microphone (Built-in)</li>
+              <li role="menuitemradio" aria-checked="false"
+                onclick="document.querySelector('[aria-label^=&quot;Microphone:&quot;]').setAttribute('aria-label','Microphone: BlackHole 2ch (Virtual)')">
+                BlackHole 2ch (Virtual)
+              </li>
+            </div>
+            """
+        )
+
+        selected = await PlaywrightPageDriver(page).ensure_microphone_device("BlackHole 2ch", 1_000)
+
+        assert selected == "BlackHole 2ch (Virtual)"
+        await browser.close()
+
+
+@pytest.mark.asyncio
 async def test_playwright_driver_uses_shortcut_when_meet_toolbar_is_hidden() -> None:
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
@@ -337,12 +365,13 @@ async def test_playwright_driver_uses_shortcut_when_meet_toolbar_is_hidden() -> 
 
 
 @pytest.mark.asyncio
-async def test_playwright_driver_disables_processing_for_blackhole() -> None:
+@pytest.mark.parametrize("close_label", ["Close", "Close dialog", "Close dialogue"])
+async def test_playwright_driver_disables_processing_for_blackhole(close_label: str) -> None:
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
         page = await browser.new_page()
         await page.set_content(
-            """
+            f"""
             <button aria-label="Audio settings" aria-expanded="false"
               onclick="this.setAttribute('aria-expanded','true'); document.querySelector('#quick').hidden=false">
               Audio settings
@@ -354,11 +383,12 @@ async def test_playwright_driver_disables_processing_for_blackhole() -> None:
             </div>
             <div id="dialog" role="dialog" hidden>
               <h1>Settings</h1>
+              <button aria-label="{close_label}" hidden>Stale close control</button>
               <button role="switch" aria-label="Studio sound" aria-checked="true"
                 onclick="this.setAttribute('aria-checked','false')"></button>
               <button role="switch" aria-label="Adaptive audio" aria-checked="true"
                 onclick="this.setAttribute('aria-checked','false')"></button>
-              <button aria-label="Close" onclick="this.parentElement.hidden=true"></button>
+              <button aria-label="{close_label}" onclick="this.parentElement.hidden=true"></button>
             </div>
             """
         )
@@ -372,6 +402,40 @@ async def test_playwright_driver_disables_processing_for_blackhole() -> None:
         )
         assert (
             await page.locator('[aria-label="Adaptive audio"]').get_attribute("aria-checked")
+            == "false"
+        )
+        assert await page.locator("#dialog").is_hidden()
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_playwright_driver_handles_audio_button_opening_full_settings_dialog() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(
+            """
+            <button aria-label="Microphone: MacBook Pro Microphone (Built-in)" hidden>
+              Stale prejoin microphone
+            </button>
+            <button aria-label="Microphone: BlackHole 2ch (Virtual)">Microphone</button>
+            <button aria-label="Audio settings" aria-expanded="false"
+              onclick="this.setAttribute('aria-expanded','true'); document.querySelector('#dialog').hidden=false">
+              Audio settings
+            </button>
+            <div id="dialog" hidden>
+              <button role="switch" aria-label="Studio sound" aria-checked="true"
+                onclick="this.setAttribute('aria-checked','false')"></button>
+              <button aria-label="Close dialog" onclick="this.parentElement.hidden=true"></button>
+            </div>
+            """
+        )
+
+        selected = await PlaywrightPageDriver(page).ensure_microphone_device("BlackHole 2ch", 1_000)
+
+        assert selected == "BlackHole 2ch (Virtual)"
+        assert (
+            await page.locator('[aria-label="Studio sound"]').get_attribute("aria-checked")
             == "false"
         )
         assert await page.locator("#dialog").is_hidden()

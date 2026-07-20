@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from uuid import uuid4
 
@@ -13,6 +14,65 @@ TASK_REQUEST = (
     "Use the workspace files to compare actual 2024 quarterly results, identify the most "
     "important caveats, and make a concise cited presentation."
 )
+
+
+async def wait_for_audio_ready(runtime, timeout_s: float = 15.0):
+    """Wait until live capture and transcription report healthy state."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        state = getattr(getattr(runtime, "audio", None), "runtime_state", None)
+        if state is not None and state.capture_state == "capturing" and state.transcription_state == "connected":
+            return state
+        await asyncio.sleep(0.1)
+    raise RuntimeError("Live audio capture/transcription did not become ready in time.")
+
+
+def normalize(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", text.casefold()))
+
+
+async def wait_for_phrase(runtime, phrase: str, timeout_s: float = 15.0):
+    deadline = time.monotonic() + timeout_s
+    wanted = normalize(phrase)
+    while time.monotonic() < deadline:
+        for segment in reversed(getattr(runtime, "transcript", [])):
+            if segment.source == "audio_stt" and wanted in normalize(segment.text):
+                return segment
+        await asyncio.sleep(0.01)
+    raise RuntimeError(f"Did not hear the expected audio phrase: {phrase}")
+
+
+def confirm_reply_heard(reply: str, second_participant_confirmed: bool) -> bool:
+    if second_participant_confirmed:
+        return True
+    return os.getenv("ROBIN_REAL_MEET_REPLY_CONFIRMED", "").casefold() in {"1", "true", "yes"}
+
+
+def validate_smoke_evidence(evidence: dict) -> None:
+    participant = evidence.get("participant_transcript") or {}
+    if participant.get("source") != "audio_stt":
+        raise SystemExit("Participant transcript did not come from audio STT.")
+    before = evidence.get("audio_before_cleanup") or {}
+    if before.get("capture_state") != "capturing" or before.get("transcription_state") != "connected":
+        raise SystemExit("Audio was not live during the smoke.")
+    if before.get("last_frame_timestamp_ms") is None or before.get("last_frame_sequence") is None:
+        raise SystemExit("Audio was not live during the smoke.")
+    after = evidence.get("audio_after_cleanup") or {}
+    if any(after.get(key) != "idle" for key in ("capture_state", "transcription_state", "playback_state")):
+        raise SystemExit(f"Audio did not stop cleanly: {after}")
+    if evidence.get("cleanup_elapsed_ms", 999999) > 2000:
+        raise SystemExit("Audio cleanup exceeded two seconds.")
+    if evidence.get("muted_after_cleanup") is not True:
+        raise SystemExit("Robin was not muted after cleanup.")
+    if evidence.get("transcription_session_active_after_cleanup"):
+        raise SystemExit("Transcription session still active after cleanup.")
+    if evidence.get("bridge_process_alive_after_cleanup"):
+        raise SystemExit(f"Bridge process still alive: pid={evidence.get('bridge_pid_before_cleanup')}")
+    if not any(
+        event.get("type") in {"runtime.emergency_stop", "meeting.leave.cleanup"}
+        for event in evidence.get("recent_events", [])
+    ):
+        raise SystemExit("Missing cleanup event.")
 
 
 async def post(client: httpx.AsyncClient, path: str, body: dict | None = None) -> dict:
