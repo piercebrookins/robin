@@ -454,11 +454,12 @@ Implemented on branch `codex/audio-latency` in worktree `/Users/vasu/code/robin-
 - `9b07284` Split speech synthesis from playback.
 - `064e755` Prefetch presentation narration with bounded concurrency.
 - `f325ab3` Ensure narration prefetch starts before sharing.
+- `a99e660` Cover deck narration failure cleanup.
 
 ### Automated verification
 
 - `make test`: passed after installing workspace JavaScript dependencies with `pnpm install`.
-  - Python: 152 passed, 5 warnings.
+  - Python: 155 passed, 5 warnings.
   - Web: 1 passed.
 - `make smoke-retry-present`: passed.
 - `make smoke-conversation-revision`: passed.
