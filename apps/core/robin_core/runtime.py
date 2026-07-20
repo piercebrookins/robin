@@ -114,6 +114,7 @@ class RobinRuntime:
         self._realtime_barge_in_items: set[str] = set()
         self._active_spoken_text: str | None = None
         self._meet_recovery_event_count = 0
+        self._meet_speech_route_event_count = 0
         self.refresh_health()
 
     def snapshot(self) -> RuntimeSnapshot:
@@ -1458,15 +1459,32 @@ class RobinRuntime:
 
     async def _narrate_deck(self, task_id: UUID, deck: DeckSpec) -> None:
         for index, slide in enumerate(deck.slides):
+            slide_started = time.perf_counter()
+            await self.emit_event(
+                "presentation.slide.started",
+                {"slide_index": index, "title": slide.title[:160]},
+                task_id=task_id,
+                component="presentation",
+            )
             await self.navigate_presentation(task_id, "goto", index=index)
             speech = self._slide_narration(deck, index)
             await self.emit_event(
                 "presentation.narration",
-                {"slide": index, "speech": speech},
+                {"slide": index, "speech": speech[:240]},
                 task_id=task_id,
                 component="presentation",
             )
-            record = await self._acknowledge(speech)
+            record = await self._acknowledge(speech, task_id=task_id, slide_index=index)
+            await self.emit_event(
+                "presentation.slide.completed",
+                {
+                    "slide_index": index,
+                    "duration_ms": int((time.perf_counter() - slide_started) * 1000),
+                    "interrupted": record.interrupted,
+                },
+                task_id=task_id,
+                component="presentation",
+            )
             if record.interrupted:
                 await self.emit_event(
                     "presentation.narration.interrupted",
@@ -2028,7 +2046,13 @@ class RobinRuntime:
             )
             await self.publish()
 
-    async def _acknowledge(self, text: str) -> SpeechRecord:
+    async def _acknowledge(
+        self,
+        text: str,
+        *,
+        task_id: UUID | None = None,
+        slide_index: int | None = None,
+    ) -> SpeechRecord:
         async with self._speech_lock:
             previous = self.meeting_state
             await self._wait_for_speech_floor(text)
@@ -2038,7 +2062,12 @@ class RobinRuntime:
             try:
                 await self.meet.unmute()
                 await self._emit_meet_recovery_events()
-                return await self._speak_and_record(text)
+                await self._emit_meet_speech_route_events()
+                return await self._speak_and_record(
+                    text,
+                    task_id=task_id,
+                    slide_index=slide_index,
+                )
             finally:
                 self._last_spoken_at_ms = int(time.time() * 1000)
                 try:
@@ -2051,8 +2080,46 @@ class RobinRuntime:
                     )
                     await self.publish()
 
-    async def _speak_and_record(self, text: str) -> SpeechRecord:
+    async def _speak_and_record(
+        self,
+        text: str,
+        *,
+        task_id: UUID | None = None,
+        slide_index: int | None = None,
+    ) -> SpeechRecord:
+        await self.emit_event(
+            "speech.synthesis.started",
+            {"task_id": str(task_id) if task_id else None, "slide_index": slide_index},
+            task_id=task_id,
+            component="speech",
+        )
         speech = await self.audio.speak(text)
+        if speech.time_to_first_audio_ms is not None:
+            await self.emit_event(
+                "speech.first_audio",
+                {
+                    "task_id": str(task_id) if task_id else None,
+                    "slide_index": slide_index,
+                    "time_to_first_audio_ms": speech.time_to_first_audio_ms,
+                    "streaming": speech.streaming,
+                    "source": speech.source,
+                },
+                task_id=task_id,
+                component="speech",
+            )
+        await self.emit_event(
+            "speech.playback.started",
+            {
+                "task_id": str(task_id) if task_id else None,
+                "slide_index": slide_index,
+                "path": speech.path,
+                "streaming": speech.streaming,
+                "source": speech.source,
+                "synthesis_duration_ms": speech.synthesis_duration_ms,
+            },
+            task_id=task_id,
+            component="speech",
+        )
         if speech.path:
             speech.path = (
                 Path(self.settings.workspace.sessions_dir) / "speech" / speech.path
@@ -2062,6 +2129,21 @@ class RobinRuntime:
         await self.emit_event(
             "speech.interrupted" if speech.interrupted else "speech.completed",
             speech.model_dump(mode="json"),
+            task_id=task_id,
+            component="speech",
+        )
+        await self.emit_event(
+            "speech.playback.completed",
+            {
+                "task_id": str(task_id) if task_id else None,
+                "slide_index": slide_index,
+                "duration_ms": speech.playback_duration_ms,
+                "interrupted": speech.interrupted,
+                "streaming": speech.streaming,
+                "source": speech.source,
+                "error": speech.error,
+            },
+            task_id=task_id,
             component="speech",
         )
         return speech
@@ -2106,6 +2188,25 @@ class RobinRuntime:
                 component="browser",
             )
         self._meet_recovery_event_count = len(events)
+
+    async def _emit_meet_speech_route_events(self, task_id: UUID | None = None) -> None:
+        events = self.meet.speech_route_events or []
+        emitted_count = getattr(self, "_meet_speech_route_event_count", 0)
+        for event in events[emitted_count:]:
+            await self.emit_event(
+                event.type,
+                {
+                    "started_at": event.started_at.isoformat(),
+                    "completed_at": event.completed_at.isoformat(),
+                    "duration_ms": event.duration_ms,
+                    "cache_status": event.cache_status,
+                    "selected_device": event.selected_device,
+                    "error": event.error,
+                },
+                task_id=task_id,
+                component="speech",
+            )
+        self._meet_speech_route_event_count = len(events)
 
     def _status_summary(self) -> str:
         active = self._active_tasks()

@@ -30,6 +30,17 @@ class BrowserRecoveryEvent:
 
 
 @dataclass
+class SpeechRouteTimingEvent:
+    type: str
+    started_at: datetime
+    completed_at: datetime
+    duration_ms: int
+    cache_status: str = "miss"
+    selected_device: str | None = None
+    error: str | None = None
+
+
+@dataclass
 class GoogleMeetAdapter:
     browser: BrowserController
     config: BrowserConfig
@@ -46,6 +57,7 @@ class GoogleMeetAdapter:
     share_dialog_result: ShareDialogResult | None = None
     presentation_evidence_path: str | None = None
     selected_microphone_device: str | None = None
+    speech_route_events: list[SpeechRouteTimingEvent] | None = None
 
     def __post_init__(self) -> None:
         if self.share_dialog is None:
@@ -291,10 +303,54 @@ class GoogleMeetAdapter:
 
     async def unmute(self) -> None:
         if self.meet_page:
-            await self.ensure_microphone_device()
-            await self.meet_page.set_microphone_muted(False, 3_000)
-            await asyncio.sleep(max(self.config.microphone_settle_ms, 0) / 1000)
-        self.muted = False
+            route_started_at = datetime.now(timezone.utc)
+            route_started = time.perf_counter()
+            self._record_speech_route_event(
+                "speech.route_prepare.started",
+                route_started_at,
+                route_started,
+            )
+            selected = None
+            route_error = None
+            try:
+                selected = await self.ensure_microphone_device()
+            except Exception as exc:
+                route_error = str(exc)
+                raise
+            finally:
+                self._record_speech_route_event(
+                    "speech.route_prepare.completed",
+                    route_started_at,
+                    route_started,
+                    selected_device=selected,
+                    error=route_error,
+                )
+            unmute_started_at = datetime.now(timezone.utc)
+            unmute_started = time.perf_counter()
+            self._record_speech_route_event(
+                "speech.unmute.started",
+                unmute_started_at,
+                unmute_started,
+                selected_device=selected,
+            )
+            unmute_error = None
+            try:
+                await self.meet_page.set_microphone_muted(False, 3_000)
+                await asyncio.sleep(max(self.config.microphone_settle_ms, 0) / 1000)
+                self.muted = False
+            except Exception as exc:
+                unmute_error = str(exc)
+                raise
+            finally:
+                self._record_speech_route_event(
+                    "speech.unmute.completed",
+                    unmute_started_at,
+                    unmute_started,
+                    selected_device=selected,
+                    error=unmute_error,
+                )
+        else:
+            self.muted = False
 
     async def ensure_microphone_device(self) -> str:
         page = self._page()
@@ -316,6 +372,30 @@ class GoogleMeetAdapter:
             raise
         self.selected_microphone_device = selected
         return selected
+
+    def _record_speech_route_event(
+        self,
+        event_type: str,
+        started_at: datetime,
+        started: float,
+        *,
+        selected_device: str | None = None,
+        cache_status: str = "miss",
+        error: str | None = None,
+    ) -> None:
+        if self.speech_route_events is None:
+            self.speech_route_events = []
+        self.speech_route_events.append(
+            SpeechRouteTimingEvent(
+                type=event_type,
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc),
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                cache_status=cache_status,
+                selected_device=selected_device,
+                error=error,
+            )
+        )
 
     async def camera_off(self) -> None:
         self.camera_enabled = False

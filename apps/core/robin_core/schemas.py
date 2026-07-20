@@ -286,6 +286,13 @@ class SpeechRecord(BaseModel):
     interrupted: bool = False
     streaming: bool = False
     time_to_first_audio_ms: int | None = None
+    synthesis_started_at: datetime | None = None
+    synthesis_completed_at: datetime | None = None
+    playback_started_at: datetime | None = None
+    playback_completed_at: datetime | None = None
+    synthesis_duration_ms: int | None = None
+    playback_duration_ms: int | None = None
+    source: Literal["streamed", "prefetched", "fallback"] = "streamed"
 
 
 class PresentationSession(BaseModel):

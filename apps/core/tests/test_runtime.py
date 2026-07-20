@@ -536,6 +536,16 @@ async def test_stop_presenting_deactivates_presentation_session(tmp_path: Path) 
         sum(1 for event in runtime.recent_events(200) if event.type == "presentation.narration")
         >= slide_count
     )
+    trace_types = {event.type for event in runtime.recent_events(400)}
+    assert "speech.route_prepare.started" in trace_types
+    assert "speech.route_prepare.completed" in trace_types
+    assert "speech.unmute.started" in trace_types
+    assert "speech.unmute.completed" in trace_types
+    assert "speech.synthesis.started" in trace_types
+    assert "speech.playback.started" in trace_types
+    assert "speech.playback.completed" in trace_types
+    assert "presentation.slide.started" in trace_types
+    assert "presentation.slide.completed" in trace_types
     assert any(event.type == "presentation.stopped" for event in runtime.recent_events())
 
 

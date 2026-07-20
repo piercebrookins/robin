@@ -42,6 +42,8 @@ class AudioBridge:
             format=self.config.speech_format,
         )
         try:
+            synthesis_started = time.perf_counter()
+            record.synthesis_started_at = now_utc()
             playback = None
             if self.config.mode == "openai" and self.config.streaming_speech_enabled:
                 playback = await self._synthesize_and_stream_openai(record)
@@ -49,10 +51,18 @@ class AudioBridge:
                 await self._synthesize_openai(record)
             else:
                 self._synthesize_simulator(record)
+            record.synthesis_completed_at = now_utc()
+            record.synthesis_duration_ms = int((time.perf_counter() - synthesis_started) * 1000)
             if playback is None and record.path and self.output_dir:
                 path = self.output_dir / record.path
                 record.duration_seconds = self._wav_duration(path)
+                playback_started = time.perf_counter()
+                record.playback_started_at = now_utc()
                 playback = await self.bridge_client.play_audio(path)
+                record.playback_completed_at = now_utc()
+                record.playback_duration_ms = int((time.perf_counter() - playback_started) * 1000)
+            elif playback is not None:
+                record.playback_completed_at = now_utc()
             if playback is not None:
                 played = playback.result.get("played", False)
                 if not playback.ok or str(played).lower() not in {"true", "1"}:
@@ -130,7 +140,9 @@ class AudioBridge:
         path = self._speech_path(record)
         pcm_path = path.with_suffix(".pcm")
         started = time.perf_counter()
+        playback_started = time.perf_counter()
         record.streaming = True
+        record.playback_started_at = now_utc()
 
         async def chunks():
             async with self.openai_client.audio.speech.with_streaming_response.create(
@@ -149,11 +161,14 @@ class AudioBridge:
                     yield chunk
 
         try:
-            return await self.bridge_client.play_pcm_stream(
+            playback = await self.bridge_client.play_pcm_stream(
                 chunks(),
                 pcm_path,
                 self.config.streaming_speech_sample_rate,
             )
+            record.playback_completed_at = now_utc()
+            record.playback_duration_ms = int((time.perf_counter() - playback_started) * 1000)
+            return playback
         finally:
             if pcm_path.exists() and pcm_path.stat().st_size:
                 self._pcm_to_wav(
