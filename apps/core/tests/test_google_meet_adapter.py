@@ -352,12 +352,13 @@ async def test_playwright_driver_disables_processing_for_blackhole() -> None:
               <button aria-label="Settings"
                 onclick="document.querySelector('#dialog').hidden=false">Settings</button>
             </div>
-            <div id="dialog" hidden>
+            <div id="dialog" role="dialog" hidden>
+              <h1>Settings</h1>
               <button role="switch" aria-label="Studio sound" aria-checked="true"
                 onclick="this.setAttribute('aria-checked','false')"></button>
               <button role="switch" aria-label="Adaptive audio" aria-checked="true"
                 onclick="this.setAttribute('aria-checked','false')"></button>
-              <button aria-label="Close dialogue" onclick="this.parentElement.hidden=true"></button>
+              <button aria-label="Close" onclick="this.parentElement.hidden=true"></button>
             </div>
             """
         )
@@ -373,6 +374,7 @@ async def test_playwright_driver_disables_processing_for_blackhole() -> None:
             await page.locator('[aria-label="Adaptive audio"]').get_attribute("aria-checked")
             == "false"
         )
+        assert await page.locator("#dialog").is_hidden()
         await browser.close()
 
 
