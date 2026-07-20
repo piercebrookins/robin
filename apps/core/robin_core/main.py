@@ -321,6 +321,14 @@ async def stop_presenting() -> RuntimeSnapshot:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/presentation-handoff/lower-hand", response_model=RuntimeSnapshot)
+async def lower_presentation_hand() -> RuntimeSnapshot:
+    try:
+        return await runtime.lower_presentation_hand()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/presentations/{task_id}", response_model=PresentationSession)
 async def presentation_state(task_id: UUID) -> PresentationSession:
     try:

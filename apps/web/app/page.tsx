@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   ExternalLink,
+  Hand,
   LoaderCircle,
   LogOut,
   Mic,
@@ -110,6 +111,7 @@ export default function Dashboard() {
   const certifiableTask = state?.tasks.slice().reverse().find((task) => task.status === "COMPLETED");
   const rehearsalChecklistComplete = REHEARSAL_CHECKS.every(([key]) => rehearsalChecks[key]);
   const currentAction = describeCurrentAction(state, activeTask?.title, activeTask?.status);
+  const handoffTask = state?.tasks.find((task) => task.id === state.presentation_handoff.task_id);
 
   async function act(path: string, body?: unknown, label = "Working") {
     setBusy(label);
@@ -266,6 +268,21 @@ export default function Dashboard() {
         </div>
       </section>
 
+      {state && state.presentation_handoff.state !== "IDLE" && (
+        <section className={`handoff-strip ${state.presentation_handoff.state === "BLOCKED" ? "blocked" : ""}`} aria-live="polite">
+          <Hand size={19} />
+          <div>
+            <span>{handoffStatus(state)}</span>
+            {handoffTask && <strong>{handoffTask.title}</strong>}
+          </div>
+          {state.presentation_handoff.state === "WAITING_FOR_INVITATION" && (
+            <button onClick={() => act("/api/presentation-handoff/lower-hand", {}, "Lowering hand")} disabled={busy !== null}>
+              Lower hand
+            </button>
+          )}
+        </section>
+      )}
+
       <div className="operator-grid">
         <section className="timeline-section">
           <div className="section-heading">
@@ -306,7 +323,7 @@ export default function Dashboard() {
                   {task.error && <p className="task-error">{task.error}</p>}
                   <div className="task-actions">
                     {deck?.url && <a href={deck.url} target="_blank" rel="noreferrer"><ExternalLink size={15} /> Open deck</a>}
-                    {deck && <button onClick={() => act(`/api/tasks/${task.id}/present`, {}, "Starting presentation")}><MonitorUp size={15} /> Present</button>}
+                    {deck && <button onClick={() => act(`/api/tasks/${task.id}/present`, {}, "Starting presentation")}><MonitorUp size={15} /> Present now (override)</button>}
                     {failed && <button onClick={() => act(`/api/tasks/${task.id}/retry`, {}, "Retrying task")}><RefreshCw size={15} /> Retry</button>}
                   </div>
                 </article>
@@ -466,11 +483,27 @@ function describeCurrentAction(state: RuntimeSnapshot | null, taskTitle?: string
   if (state.meeting_state === "REQUESTING_ADMISSION") return "waiting to be admitted";
   if (state.meeting_state === "SPEAKING") return "speaking in the meeting";
   if (state.presenting) return "presenting the finished work";
+  if (state.presentation_handoff.state === "WAITING_FOR_INVITATION") return "waiting with hand raised";
+  if (state.presentation_handoff.state === "INVITATION_RECEIVED") return "accepting the invitation to present";
+  if (state.presentation_handoff.state === "STARTING_PRESENTATION") return "starting the presentation";
+  if (state.presentation_handoff.state === "BLOCKED") return "blocked on presentation handoff";
   if (taskStatus === "EXECUTING") return `working on ${taskTitle ?? "the request"}`;
   if (taskStatus === "VALIDATING") return "checking the finished analysis";
   if (taskStatus === "READY_TO_PRESENT") return "ready to present";
   if (state.capture_loop_running) return 'listening for “Robin”';
   return "ready for a meeting";
+}
+
+function handoffStatus(state: RuntimeSnapshot) {
+  const handoff = state.presentation_handoff;
+  if (handoff.state === "RAISING_HAND") return "Raising hand";
+  if (handoff.state === "WAITING_FOR_INVITATION") return "Hand raised — waiting to present";
+  if (handoff.state === "INVITATION_RECEIVED") return `Invitation received${handoff.invited_by ? ` from ${handoff.invited_by}` : ""}`;
+  if (handoff.state === "LOWERING_HAND") return "Lowering hand";
+  if (handoff.state === "STARTING_PRESENTATION") return "Starting presentation";
+  if (handoff.state === "PRESENTING") return "Presenting";
+  if (handoff.state === "BLOCKED") return `Presentation handoff blocked${handoff.error ? ` — ${handoff.error}` : ""}`;
+  return "Presentation handoff idle";
 }
 
 function eventMessage(event: EventEnvelope) {
@@ -515,6 +548,17 @@ function eventMessage(event: EventEnvelope) {
     "agent.deliverable.revision_requested": "Asked the agent to tighten or correct its draft",
     "task.validating": "Validating the result",
     "task.completed": "Verified work and slides are ready",
+    "presentation.handoff.queued": "Queued Robin to request the floor",
+    "meeting.hand.raise.started": "Raising Robin's hand",
+    "meeting.hand.raised": "Robin's hand is raised",
+    "meeting.hand.raise.failed": "Could not raise Robin's hand",
+    "presentation.invitation.detected": "Participant invited Robin to present",
+    "presentation.invitation.rejected": "Presentation invitation was rejected",
+    "meeting.hand.lowered": "Robin's hand was lowered",
+    "meeting.hand.lower.failed": "Could not lower Robin's hand",
+    "presentation.handoff.started": "Starting handoff presentation",
+    "presentation.handoff.cleared": "Presentation handoff cleared",
+    "presentation.handoff.blocked": "Presentation handoff blocked",
     "task.failed": "Task failed",
     "artifact.created": `Created ${String(event.payload.type ?? "an artifact").replaceAll("_", " ")}`,
     "speech.completed": `Said: ${String(event.payload.text ?? "status update")}`,

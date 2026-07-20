@@ -447,6 +447,34 @@ class GoogleMeetAdapter:
     async def camera_off(self) -> None:
         self.camera_enabled = False
 
+    async def raise_hand(self) -> None:
+        page = self._page()
+        if await self.is_hand_raised():
+            return
+        if not await page.is_visible(MEET_SELECTORS["raise_hand_button"], 750):
+            if await page.is_visible(MEET_SELECTORS["reactions_button"], 750):
+                await self._click_with_recovery(
+                    "reactions_button", MEET_SELECTORS["reactions_button"], 2_000
+                )
+        await self._click_with_recovery(
+            "raise_hand_button", MEET_SELECTORS["raise_hand_button"], 3_000
+        )
+        if not await page.is_visible(MEET_SELECTORS["hand_raised_signal"], 3_000):
+            raise TimeoutError("Meet did not confirm Robin's raised hand.")
+
+    async def lower_hand(self) -> None:
+        page = self._page()
+        if not await self.is_hand_raised():
+            return
+        await self._click_with_recovery(
+            "lower_hand_button", MEET_SELECTORS["lower_hand_button"], 3_000
+        )
+        if await page.is_visible(MEET_SELECTORS["hand_raised_signal"], 1_500):
+            raise TimeoutError("Meet did not confirm Robin's hand was lowered.")
+
+    async def is_hand_raised(self) -> bool:
+        return await self._page().is_visible(MEET_SELECTORS["hand_raised_signal"], 500)
+
     async def start_presenting(self, url: str) -> None:
         if not url:
             raise ValueError("Presentation URL is required.")

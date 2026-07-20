@@ -93,6 +93,28 @@ def healthy_evidence() -> dict:
     }
 
 
+def healthy_handoff_state(task_id: str = "task-1") -> dict:
+    return {
+        "tasks": [
+            {
+                "id": task_id,
+                "status": "READY_TO_PRESENT",
+                "presentation_ready_at": "2026-07-20T12:00:00Z",
+            }
+        ],
+        "artifacts": [
+            {"task_id": task_id, "type": "validation_json"},
+            {"task_id": task_id, "type": "deck_json"},
+        ],
+        "presentation_handoff": {
+            "task_id": task_id,
+            "state": "WAITING_FOR_INVITATION",
+            "hand_raised": True,
+            "task_revision": 1,
+        },
+    }
+
+
 def test_validate_smoke_evidence_accepts_real_audio_cleanup() -> None:
     smoke_real_meet.validate_smoke_evidence(healthy_evidence())
 
@@ -144,3 +166,37 @@ def test_validate_smoke_evidence_rejects_missing_cleanup_event() -> None:
 
     with pytest.raises(SystemExit, match="Missing cleanup event"):
         smoke_real_meet.validate_smoke_evidence(evidence)
+
+
+def test_validate_waiting_handoff_accepts_ready_raised_hand() -> None:
+    smoke_real_meet.validate_waiting_handoff(healthy_handoff_state(), "task-1")
+
+
+def test_validate_waiting_handoff_rejects_missing_hand_raise() -> None:
+    state = healthy_handoff_state()
+    state["presentation_handoff"]["hand_raised"] = False
+
+    with pytest.raises(RuntimeError, match="did not raise"):
+        smoke_real_meet.validate_waiting_handoff(state, "task-1")
+
+
+def test_validate_waiting_handoff_rejects_missing_ready_timestamp() -> None:
+    state = healthy_handoff_state()
+    state["tasks"][0]["presentation_ready_at"] = None
+
+    with pytest.raises(RuntimeError, match="presentation_ready_at"):
+        smoke_real_meet.validate_waiting_handoff(state, "task-1")
+
+
+def test_saw_autonomous_handoff_requires_invitation_and_completion_events() -> None:
+    task_id = "task-1"
+    events = [
+        {"type": "presentation.handoff.queued", "task_id": task_id},
+        {"type": "meeting.hand.raised", "task_id": task_id},
+        {"type": "presentation.invitation.detected", "task_id": task_id},
+        {"type": "presentation.handoff.started", "task_id": task_id},
+        {"type": "presentation.completed", "task_id": task_id},
+    ]
+
+    assert smoke_real_meet.saw_autonomous_handoff(events, task_id) is True
+    assert smoke_real_meet.saw_autonomous_handoff(events[:-1], task_id) is False

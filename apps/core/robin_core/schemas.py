@@ -110,6 +110,7 @@ class MeetingIntent(BaseModel):
         "possible_task",
         "direct_request",
         "confirmed_task",
+        "presentation_invitation",
         "clarification_answer",
         "task_modification",
         "task_cancellation",
@@ -143,10 +144,34 @@ class RobinTask(BaseModel):
     updated_at: datetime = Field(default_factory=now_utc)
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    presentation_ready_at: datetime | None = None
     parent_task_id: UUID | None = None
     error: str | None = None
     outcome_state: TaskOutcomeState = TaskOutcomeState.UNVERIFIED
     outcome_detail: str | None = None
+
+
+class PresentationHandoffState(StrEnum):
+    IDLE = "IDLE"
+    RAISING_HAND = "RAISING_HAND"
+    WAITING_FOR_INVITATION = "WAITING_FOR_INVITATION"
+    INVITATION_RECEIVED = "INVITATION_RECEIVED"
+    LOWERING_HAND = "LOWERING_HAND"
+    STARTING_PRESENTATION = "STARTING_PRESENTATION"
+    PRESENTING = "PRESENTING"
+    BLOCKED = "BLOCKED"
+
+
+class PresentationHandoff(BaseModel):
+    id: str = "presentation_handoff"
+    state: PresentationHandoffState = PresentationHandoffState.IDLE
+    task_id: UUID | None = None
+    task_revision: int | None = None
+    hand_raised: bool = False
+    invited_by: str | None = None
+    invitation_segment_id: UUID | None = None
+    updated_at: datetime = Field(default_factory=now_utc)
+    error: str | None = None
 
 
 class FileIndexRecord(BaseModel):
@@ -402,6 +427,7 @@ class RuntimeSnapshot(BaseModel):
     artifacts: list[Artifact]
     speech: list[SpeechRecord] = Field(default_factory=list)
     presentations: list[PresentationSession] = Field(default_factory=list)
+    presentation_handoff: PresentationHandoff = Field(default_factory=PresentationHandoff)
 
 
 class JoinMeetingRequest(BaseModel):

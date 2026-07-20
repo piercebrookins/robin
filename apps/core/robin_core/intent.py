@@ -18,11 +18,19 @@ class IntentClassifier:
             AsyncOpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
         )
 
-    async def classify(self, text: str, active_tasks: list[RobinTask]) -> MeetingIntent:
+    async def classify(
+        self,
+        text: str,
+        active_tasks: list[RobinTask],
+        pending_presentation: dict | None = None,
+    ) -> MeetingIntent:
+        invitation = self._classify_presentation_invitation(text, pending_presentation)
+        if invitation is not None:
+            return invitation
         if self.client:
             try:
                 intent = await asyncio.wait_for(
-                    self._classify_openai(text, active_tasks),
+                    self._classify_openai(text, active_tasks, pending_presentation),
                     timeout=self.settings.model.intent_timeout_seconds,
                 )
                 local = self._classify_local(text, active_tasks)
@@ -38,7 +46,12 @@ class IntentClassifier:
                 return self._classify_local(text, active_tasks)
         return self._classify_local(text, active_tasks)
 
-    async def _classify_openai(self, text: str, active_tasks: list[RobinTask]) -> MeetingIntent:
+    async def _classify_openai(
+        self,
+        text: str,
+        active_tasks: list[RobinTask],
+        pending_presentation: dict | None = None,
+    ) -> MeetingIntent:
         active = [
             {"id": str(task.id), "title": task.title, "status": task.status}
             for task in active_tasks
@@ -51,15 +64,80 @@ class IntentClassifier:
                     "content": (
                         "Classify meeting turns for Robin. Return only JSON matching MeetingIntent. "
                         "Use conversation_request when Robin is directly addressed with a greeting, "
-                        "voice check, or brief question that is not a task/status/cancel request."
+                        "voice check, or brief question that is not a task/status/cancel request. "
+                        "Use presentation_invitation only when the turn clearly grants Robin the "
+                        "floor or asks Robin to share/present the pending validated presentation."
                     ),
                 },
-                {"role": "user", "content": json.dumps({"turn": text, "active_tasks": active})},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "turn": text,
+                            "active_tasks": active,
+                            "pending_presentation": pending_presentation,
+                        }
+                    ),
+                },
             ],
             text={"format": {"type": "json_object"}},
         )
         raw = response.output_text
         return MeetingIntent.model_validate_json(raw)
+
+    def _classify_presentation_invitation(
+        self, text: str, pending_presentation: dict | None
+    ) -> MeetingIntent | None:
+        if not pending_presentation or pending_presentation.get("state") != "WAITING_FOR_INVITATION":
+            return None
+        lowered = text.casefold()
+        wake_word = str(getattr(self.settings.audio, "wake_word", "robin") or "").casefold()
+        require_wake_word = bool(
+            pending_presentation.get(
+                "require_wake_word",
+                self.settings.presentation.require_wake_word_for_invitation,
+            )
+        )
+        addressed = not wake_word or bool(
+            re.search(rf"(?<!\w){re.escape(wake_word)}(?!\w)", lowered)
+        )
+        if not require_wake_word:
+            addressed = True
+        if not addressed:
+            return None
+        rejects = (
+            "did robin raise",
+            "has robin raised",
+            "robin has a deck",
+            "robin raised",
+            "later",
+            "not now",
+        )
+        if any(phrase in lowered for phrase in rejects):
+            return None
+        grants_floor = bool(
+            re.search(
+                r"\b(go ahead|you can share|can share|please share|share now|"
+                r"could you share|present what|could you present|show us|"
+                r"let'?s see|tell us what|you have the floor|floor is yours)\b",
+                lowered,
+            )
+        )
+        mentions_hand = "hand" in lowered and any(
+            phrase in lowered
+            for phrase in ("share", "present", "go ahead", "show", "tell us", "floor")
+        )
+        if not grants_floor and not mentions_hand:
+            return None
+        task_id = pending_presentation.get("task_id")
+        ref_id = UUID(str(task_id)) if task_id else None
+        return MeetingIntent(
+            classification="presentation_invitation",
+            confidence=0.94,
+            addressed_to_robin=True,
+            referenced_task_id=ref_id,
+            should_acknowledge=False,
+        )
 
     def _classify_local(self, text: str, active_tasks: list[RobinTask]) -> MeetingIntent:
         lowered = text.lower()

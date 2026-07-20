@@ -36,6 +36,8 @@ from .schemas import (
     MeetingMemoryItem,
     MeetingState,
     CalendarSnapshot,
+    PresentationHandoff,
+    PresentationHandoffState,
     RobinTask,
     RuntimeSnapshot,
     RuntimeMetrics,
@@ -91,6 +93,8 @@ class RobinRuntime:
         self.files: list[FileIndexRecord] = self.store.list("file", FileIndexRecord)
         self.speech: list[SpeechRecord] = self.store.list("speech", SpeechRecord)
         self.presentations: dict[UUID, PresentationSession] = {}
+        handoffs = self.store.list("presentation_handoff", PresentationHandoff)
+        self.presentation_handoff = handoffs[0] if handoffs else PresentationHandoff()
         self.health: list[HealthItem] = []
         self.task_slots = asyncio.Semaphore(self.settings.runtime.max_concurrent_tasks)
         self._task_handles: dict[UUID, asyncio.Task] = {}
@@ -100,6 +104,7 @@ class RobinRuntime:
         self._join_lock = asyncio.Lock()
         self._speech_lock = asyncio.Lock()
         self._capture_lock = asyncio.Lock()
+        self._handoff_lock = asyncio.Lock()
         self._speech_handles: set[asyncio.Task] = set()
         self._memory_handles: set[asyncio.Task] = set()
         self._last_spoken_at_ms = 0
@@ -139,6 +144,7 @@ class RobinRuntime:
             artifacts=sorted(self.artifacts, key=lambda artifact: artifact.created_at),
             speech=sorted(self.speech, key=lambda item: item.started_at)[-25:],
             presentations=sorted(self.presentations.values(), key=lambda item: item.updated_at),
+            presentation_handoff=self.presentation_handoff,
         )
 
     def refresh_health(self) -> None:
@@ -447,6 +453,8 @@ class RobinRuntime:
             await self.stop_listening_loop()
         if self.meet.presenting or any(state.active for state in self.presentations.values()):
             await self.stop_presenting()
+        async with self._handoff_lock:
+            await self._clear_handoff_for_task(None, "meeting_left")
         await self.meet.leave()
         self.meeting_state = self.meet.state
         await self._emit_meet_recovery_events()
@@ -497,10 +505,16 @@ class RobinRuntime:
         for task in self.tasks:
             if task.status not in {TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED}:
                 task.status = TaskStatus.CANCELLED
+                task.presentation_ready_at = None
                 task.outcome_state = TaskOutcomeState.CANCELLED
                 task.outcome_detail = "Cancelled by emergency stop."
                 task.updated_at = now_utc()
                 self.store.upsert("task", task)
+        try:
+            async with self._handoff_lock:
+                await self._clear_handoff_for_task(None, "emergency_stop")
+        except Exception as exc:
+            cleanup_errors.append(f"clear_handoff: {exc}")
         try:
             await self.audio.stop()
         except Exception as exc:
@@ -1250,6 +1264,23 @@ class RobinRuntime:
             and not self._is_recent_robin_echo(text)
         )
 
+    def _looks_like_ambiguous_presentation_invitation(self, text: str) -> bool:
+        if (
+            self.settings.presentation.require_wake_word_for_invitation
+            and not self._contains_wake_word(text)
+        ):
+            return False
+        lowered = text.casefold()
+        if any(
+            phrase in lowered
+            for phrase in ("did robin raise", "has robin raised", "robin has a deck")
+        ):
+            return False
+        return any(
+            word in lowered
+            for word in ("deck", "slides", "present", "share", "hand", "show", "floor")
+        )
+
     async def create_task(self, text: str, requester_name: str | None = None) -> RobinTask:
         duplicate = await self._handle_duplicate_task_request(text)
         if duplicate:
@@ -1278,7 +1309,10 @@ class RobinRuntime:
 
     async def cancel_task(self, task_id: UUID) -> None:
         task = self._find_task(task_id)
+        async with self._handoff_lock:
+            await self._clear_handoff_for_task(task.id, "task_cancelled")
         task.status = TaskStatus.CANCELLED
+        task.presentation_ready_at = None
         task.updated_at = now_utc()
         task.outcome_state = TaskOutcomeState.CANCELLED
         task.outcome_detail = "Cancelled by a meeting participant or operator."
@@ -1306,6 +1340,8 @@ class RobinRuntime:
         }
         if task.status in active_statuses:
             raise ValueError(f"Task is already active: {task.status}")
+        async with self._handoff_lock:
+            await self._clear_handoff_for_task(task.id, "task_retried")
         task.revision += 1
         task.status = TaskStatus.ACCEPTED
         task.error = None
@@ -1313,6 +1349,7 @@ class RobinRuntime:
         task.outcome_detail = None
         task.started_at = None
         task.completed_at = None
+        task.presentation_ready_at = None
         task.updated_at = now_utc()
         self.store.upsert("task", task)
         await self.emit_event(
@@ -1325,12 +1362,325 @@ class RobinRuntime:
         self._schedule_task(task)
         return await self.publish()
 
+    async def request_presentation_floor(self, task_id: UUID, revision: int) -> RuntimeSnapshot:
+        async with self._handoff_lock:
+            task = self._find_task(task_id)
+            if task.revision != revision or task.status != TaskStatus.READY_TO_PRESENT:
+                return await self.publish()
+            await self.emit_event(
+                "presentation.handoff.queued",
+                {"revision": revision},
+                task_id=task.id,
+                component="presentation",
+            )
+            await self._advance_presentation_handoff_locked()
+            return await self.publish()
+
+    async def lower_presentation_hand(self) -> RuntimeSnapshot:
+        async with self._handoff_lock:
+            await self._clear_handoff_for_task(None, "operator_lowered")
+            return await self.publish()
+
+    async def accept_presentation_invitation(
+        self, segment: TranscriptSegment, intent: MeetingIntent
+    ) -> bool:
+        async with self._handoff_lock:
+            handoff = self.presentation_handoff
+            if handoff.invitation_segment_id == segment.id:
+                return True
+            if handoff.state != PresentationHandoffState.WAITING_FOR_INVITATION:
+                return False
+            if intent.referenced_task_id and intent.referenced_task_id != handoff.task_id:
+                await self.emit_event(
+                    "presentation.invitation.rejected",
+                    {
+                        "reason": "wrong_task",
+                        "segment_id": str(segment.id),
+                        "referenced_task_id": str(intent.referenced_task_id),
+                    },
+                    task_id=handoff.task_id,
+                    component="presentation",
+                )
+                return True
+            task = self._handoff_task()
+            if task is None or not self._task_matches_handoff(task):
+                await self._reject_stale_invitation(segment, "stale_task_or_revision")
+                await self._clear_handoff_for_task(handoff.task_id, "stale_invitation")
+                await self._advance_presentation_handoff_locked()
+                return True
+            start_blocker = self._presentation_start_blocker(task)
+            if start_blocker is not None:
+                await self._reject_stale_invitation(segment, start_blocker)
+                await self._block_handoff(start_blocker.replace("_", " "), task.id)
+                return True
+            if self._artifact_for_revision(task.id, "deck_json", task.revision) is None:
+                await self._reject_stale_invitation(segment, "missing_deck")
+                await self._block_handoff("Validated deck artifact is missing.", task.id)
+                return True
+            handoff.state = PresentationHandoffState.INVITATION_RECEIVED
+            handoff.invited_by = segment.speaker_name
+            handoff.invitation_segment_id = segment.id
+            handoff.updated_at = now_utc()
+            self._persist_handoff()
+            await self.emit_event(
+                "presentation.invitation.detected",
+                {
+                    "revision": task.revision,
+                    "segment_id": str(segment.id),
+                    "invited_by": segment.speaker_name,
+                },
+                task_id=task.id,
+                component="presentation",
+            )
+            if handoff.hand_raised:
+                handoff.state = PresentationHandoffState.LOWERING_HAND
+                handoff.updated_at = now_utc()
+                self._persist_handoff()
+                try:
+                    await self.meet.lower_hand()
+                    handoff.hand_raised = False
+                    await self.emit_event(
+                        "meeting.hand.lowered",
+                        {"revision": task.revision},
+                        task_id=task.id,
+                        component="meeting",
+                    )
+                except Exception as exc:
+                    await self.emit_event(
+                        "meeting.hand.lower.failed",
+                        {"error": str(exc), "revision": task.revision},
+                        task_id=task.id,
+                        component="meeting",
+                    )
+                finally:
+                    await self._emit_meet_recovery_events(task.id)
+            handoff.state = PresentationHandoffState.STARTING_PRESENTATION
+            handoff.updated_at = now_utc()
+            self._persist_handoff()
+            await self.emit_event(
+                "presentation.handoff.started",
+                {"revision": task.revision},
+                task_id=task.id,
+                component="presentation",
+            )
+            try:
+                handoff.state = PresentationHandoffState.PRESENTING
+                handoff.updated_at = now_utc()
+                self._persist_handoff()
+                await self._present_task(task.id)
+            except Exception as exc:
+                await self._block_handoff(str(exc), task.id)
+                return True
+            await self._clear_handoff_for_task(task.id, "presentation_completed")
+            await self._advance_presentation_handoff_locked()
+            return True
+
+    async def _advance_presentation_handoff_locked(self) -> None:
+        if self.presentation_handoff.state != PresentationHandoffState.IDLE:
+            return
+        task = self._next_ready_presentation_task()
+        if task is None:
+            self.presentation_handoff = PresentationHandoff()
+            self._persist_handoff()
+            return
+        handoff = PresentationHandoff(
+            state=PresentationHandoffState.RAISING_HAND,
+            task_id=task.id,
+            task_revision=task.revision,
+            hand_raised=False,
+        )
+        self.presentation_handoff = handoff
+        self._persist_handoff()
+        await self.emit_event(
+            "meeting.hand.raise.started",
+            {"revision": task.revision},
+            task_id=task.id,
+            component="meeting",
+        )
+        try:
+            await self.meet.raise_hand()
+            handoff.state = PresentationHandoffState.WAITING_FOR_INVITATION
+            handoff.hand_raised = True
+            handoff.updated_at = now_utc()
+            self._persist_handoff()
+            await self.emit_event(
+                "meeting.hand.raised",
+                {"revision": task.revision},
+                task_id=task.id,
+                component="meeting",
+            )
+        except Exception as exc:
+            await self._block_handoff(
+                str(exc),
+                task.id,
+                event_type="meeting.hand.raise.failed",
+                component="meeting",
+            )
+        finally:
+            await self._emit_meet_recovery_events(task.id)
+
+    async def _clear_handoff_for_task(self, task_id: UUID | None, reason: str) -> None:
+        handoff = self.presentation_handoff
+        if handoff.state == PresentationHandoffState.IDLE:
+            return
+        if task_id is not None and handoff.task_id not in {None, task_id}:
+            return
+        original_task_id = handoff.task_id
+        if handoff.hand_raised:
+            try:
+                await self.meet.lower_hand()
+                await self.emit_event(
+                    "meeting.hand.lowered",
+                    {"reason": reason, "revision": handoff.task_revision},
+                    task_id=original_task_id,
+                    component="meeting",
+                )
+            except Exception as exc:
+                await self.emit_event(
+                    "meeting.hand.lower.failed",
+                    {"reason": reason, "error": str(exc), "revision": handoff.task_revision},
+                    task_id=original_task_id,
+                    component="meeting",
+                )
+            finally:
+                await self._emit_meet_recovery_events(original_task_id)
+        self.presentation_handoff = PresentationHandoff()
+        self._persist_handoff()
+        await self.emit_event(
+            "presentation.handoff.cleared",
+            {"reason": reason},
+            task_id=original_task_id,
+            component="presentation",
+        )
+
+    async def _reject_stale_invitation(self, segment: TranscriptSegment, reason: str) -> None:
+        await self.emit_event(
+            "presentation.invitation.rejected",
+            {"reason": reason, "segment_id": str(segment.id), "speaker_name": segment.speaker_name},
+            task_id=self.presentation_handoff.task_id,
+            component="presentation",
+        )
+
+    async def _block_handoff(
+        self,
+        error: str,
+        task_id: UUID | None,
+        event_type: str = "presentation.handoff.blocked",
+        component: str = "presentation",
+    ) -> None:
+        self.presentation_handoff.state = PresentationHandoffState.BLOCKED
+        self.presentation_handoff.error = error
+        self.presentation_handoff.updated_at = now_utc()
+        self._persist_handoff()
+        await self.emit_event(
+            event_type,
+            {"error": error, "revision": self.presentation_handoff.task_revision},
+            task_id=task_id,
+            component=component,
+        )
+
+    def _handoff_task(self) -> RobinTask | None:
+        task_id = self.presentation_handoff.task_id
+        if task_id is None:
+            return None
+        try:
+            return self._find_task(task_id)
+        except KeyError:
+            return None
+
+    def _task_matches_handoff(self, task: RobinTask) -> bool:
+        return (
+            task.status == TaskStatus.READY_TO_PRESENT
+            and self.presentation_handoff.task_id == task.id
+            and self.presentation_handoff.task_revision == task.revision
+        )
+
+    def _next_ready_presentation_task(self) -> RobinTask | None:
+        eligible = [
+            task
+            for task in self.tasks
+            if task.status == TaskStatus.READY_TO_PRESENT
+            and task.presentation_ready_at is not None
+            and self._artifact_for_revision(task.id, "deck_json", task.revision) is not None
+        ]
+        return min(eligible, key=lambda task: task.presentation_ready_at) if eligible else None
+
+    def _presentation_start_blocker(self, task: RobinTask) -> str | None:
+        if task.status != TaskStatus.READY_TO_PRESENT:
+            return "task_not_ready_to_present"
+        if task.revision != self.presentation_handoff.task_revision:
+            return "stale_task_or_revision"
+        if self.meeting_state not in {
+            MeetingState.JOINED,
+            MeetingState.LISTENING,
+            MeetingState.SPEAKING,
+        }:
+            return "not_in_meeting"
+        if self.meet.presenting or any(state.active for state in self.presentations.values()):
+            return "presentation_already_active"
+        return None
+
+    def _persist_handoff(self) -> None:
+        self.presentation_handoff.updated_at = now_utc()
+        self.store.upsert("presentation_handoff", self.presentation_handoff)
+
+    def _pending_presentation_context(self) -> dict | None:
+        handoff = self.presentation_handoff
+        if handoff.task_id is None:
+            return None
+        task = self._handoff_task()
+        return {
+            "task_id": str(handoff.task_id),
+            "title": task.title if task else None,
+            "revision": handoff.task_revision,
+            "state": handoff.state.value,
+            "hand_raised": handoff.hand_raised,
+            "require_wake_word": self.settings.presentation.require_wake_word_for_invitation,
+        }
+
+    async def _lower_hand_after_share_started(self, task_id: UUID) -> None:
+        handoff = self.presentation_handoff
+        if handoff.task_id != task_id or not handoff.hand_raised:
+            return
+        try:
+            if not await self.meet.is_hand_raised():
+                handoff.hand_raised = False
+                self._persist_handoff()
+                return
+            await self.meet.lower_hand()
+            handoff.hand_raised = False
+            self._persist_handoff()
+            await self.emit_event(
+                "meeting.hand.lowered",
+                {"reason": "after_share_started", "revision": handoff.task_revision},
+                task_id=task_id,
+                component="meeting",
+            )
+        except Exception as exc:
+            await self.emit_event(
+                "meeting.hand.lower.failed",
+                {
+                    "reason": "after_share_started",
+                    "error": str(exc),
+                    "revision": handoff.task_revision,
+                },
+                task_id=task_id,
+                component="meeting",
+            )
+        finally:
+            await self._emit_meet_recovery_events(task_id)
+
     async def present_task(self, task_id: UUID) -> RuntimeSnapshot:
+        async with self._handoff_lock:
+            await self._clear_handoff_for_task(None, "manual_override")
+            return await self._present_task(task_id)
+
+    async def _present_task(self, task_id: UUID) -> RuntimeSnapshot:
         task = self._find_task(task_id)
-        deck = self._latest_artifact(task_id, "deck_json")
+        deck = self._artifact_for_revision(task_id, "deck_json", task.revision)
         if not deck or not deck.url:
             raise ValueError("Task has no presentation artifact.")
-        deck_spec = self._load_deck(task_id)
+        deck_spec = self._load_deck(task_id, revision=task.revision)
         narrations = [
             self._slide_narration(deck_spec, index)
             for index in range(len(deck_spec.slides))
@@ -1372,6 +1722,7 @@ class RobinRuntime:
             await self.meet.start_presenting(deck.url)
             self.meeting_state = self.meet.state
             await self._emit_meet_recovery_events(task.id)
+            await self._lower_hand_after_share_started(task.id)
             await self._narrate_deck(task.id, deck_spec, narrations, prefetch)
         except Exception as exc:
             task.error = str(exc)
@@ -1394,6 +1745,7 @@ class RobinRuntime:
         task.outcome_state = TaskOutcomeState.VERIFIED
         task.outcome_detail = "Artifact validation and live presentation completed."
         task.completed_at = now_utc()
+        task.presentation_ready_at = None
         task.updated_at = now_utc()
         self.store.upsert("task", task)
         await self.emit_event(
@@ -1485,8 +1837,12 @@ class RobinRuntime:
     def _deck_slide_count(self, task_id: UUID) -> int:
         return len(self._load_deck(task_id).slides)
 
-    def _load_deck(self, task_id: UUID) -> DeckSpec:
-        deck = self._latest_artifact(task_id, "deck_json")
+    def _load_deck(self, task_id: UUID, revision: int | None = None) -> DeckSpec:
+        deck = (
+            self._artifact_for_revision(task_id, "deck_json", revision)
+            if revision is not None
+            else self._latest_artifact(task_id, "deck_json")
+        )
         if not deck:
             raise ValueError("Task has no presentation deck.")
         return DeckSpec.model_validate_json(self.workspace.resolve(deck.path).read_text())
@@ -1602,7 +1958,14 @@ class RobinRuntime:
         return candidate[: max_chars - 1].rstrip(" ,;:") + "."
 
     async def _handle_intent(self, segment: TranscriptSegment) -> None:
-        if not self._contains_wake_word(segment.text):
+        pending_presentation = self._pending_presentation_context()
+        if (
+            not self._contains_wake_word(segment.text)
+            and (
+                pending_presentation is None
+                or self.settings.presentation.require_wake_word_for_invitation
+            )
+        ):
             await self.emit_event(
                 "conversation.ignored",
                 {"text": segment.text, "reason": "wake_word_missing"},
@@ -1610,6 +1973,31 @@ class RobinRuntime:
             )
             return
         if await self._handle_pending_confirmation(segment):
+            return
+        if pending_presentation is not None:
+            invitation = await self.intent.classify(
+                segment.text,
+                self._active_tasks(),
+                pending_presentation=pending_presentation,
+            )
+            if invitation.classification == "presentation_invitation":
+                await self.accept_presentation_invitation(segment, invitation)
+                return
+            if self._looks_like_ambiguous_presentation_invitation(segment.text):
+                await self.emit_event(
+                    "presentation.invitation.rejected",
+                    {"reason": "ambiguous", "segment_id": str(segment.id)},
+                    task_id=self.presentation_handoff.task_id,
+                    component="presentation",
+                )
+                await self._acknowledge("Should I present the ready deck now?")
+                return
+        if not self._contains_wake_word(segment.text):
+            await self.emit_event(
+                "conversation.ignored",
+                {"text": segment.text, "reason": "wake_word_missing"},
+                component="conversation",
+            )
             return
         if await self._handle_duplicate_task_request(segment.text):
             return
@@ -1647,7 +2035,10 @@ class RobinRuntime:
             )
         elif intent.classification == "task_modification" and intent.referenced_task_id:
             task = self._find_task(intent.referenced_task_id)
+            async with self._handoff_lock:
+                await self._clear_handoff_for_task(task.id, "task_revised")
             task.revision += 1
+            task.presentation_ready_at = None
             task.constraints = sorted(set(task.constraints + intent.constraints + [segment.text]))
             task.outcome_state = TaskOutcomeState.UNVERIFIED
             task.outcome_detail = (
@@ -1974,6 +2365,7 @@ class RobinRuntime:
                 if not validation.ok:
                     failed_checks = [check.name for check in validation.checks if not check.ok]
                     task.status = TaskStatus.FAILED
+                    task.presentation_ready_at = None
                     task.error = f"Validation failed: {', '.join(failed_checks)}"
                     task.outcome_state = TaskOutcomeState.FAILED
                     task.outcome_detail = task.error
@@ -1991,6 +2383,7 @@ class RobinRuntime:
                     await self.publish()
                     return
                 task.status = TaskStatus.READY_TO_PRESENT
+                task.presentation_ready_at = task.presentation_ready_at or now_utc()
                 task.outcome_state = TaskOutcomeState.VERIFIED
                 task.outcome_detail = "Grounding, citations, and artifact validation passed."
                 task.updated_at = now_utc()
@@ -2002,9 +2395,13 @@ class RobinRuntime:
                     component="task_orchestrator",
                 )
                 await self.publish()
-                await self._safe_acknowledge("The analysis and slides are ready.")
+                if self.settings.presentation.hand_raise_handoff_enabled:
+                    asyncio.create_task(self.request_presentation_floor(task.id, task.revision))
+                else:
+                    await self._safe_acknowledge("The analysis and slides are ready.")
         except asyncio.CancelledError:
             task.status = TaskStatus.CANCELLED
+            task.presentation_ready_at = None
             task.outcome_state = TaskOutcomeState.CANCELLED
             task.outcome_detail = "Execution was cancelled before verification."
             task.updated_at = now_utc()
@@ -2018,6 +2415,7 @@ class RobinRuntime:
             await self.publish()
         except Exception as exc:
             task.status = TaskStatus.FAILED
+            task.presentation_ready_at = None
             task.error = str(exc)
             if self._is_recoverable_task_blocker(exc):
                 task.outcome_state = TaskOutcomeState.BLOCKED
@@ -2448,6 +2846,20 @@ class RobinRuntime:
         if not artifacts:
             return None
         return max(artifacts, key=lambda artifact: (artifact.revision, artifact.created_at))
+
+    def _artifact_for_revision(
+        self, task_id: UUID, artifact_type: str, revision: int
+    ) -> Artifact | None:
+        artifacts = [
+            artifact
+            for artifact in self.artifacts
+            if artifact.task_id == task_id
+            and artifact.type == artifact_type
+            and artifact.revision == revision
+        ]
+        if not artifacts:
+            return None
+        return max(artifacts, key=lambda artifact: artifact.created_at)
 
     async def emit_event(
         self,

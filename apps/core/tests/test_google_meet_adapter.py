@@ -128,6 +128,42 @@ async def test_google_meet_enables_captions_after_admission() -> None:
 
 
 @pytest.mark.asyncio
+async def test_google_meet_hand_raise_and_lower_are_idempotent_in_simulator() -> None:
+    config = BrowserConfig(automation_mode="simulator")
+    adapter = GoogleMeetAdapter(BrowserController(config), config)
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    await adapter.join()
+    page = adapter.meet_page
+    assert isinstance(page, SimulatedPageDriver)
+
+    await adapter.raise_hand()
+    await adapter.raise_hand()
+    await adapter.lower_hand()
+    await adapter.lower_hand()
+
+    assert page.clicked.count("raise_hand_button") == 1
+    assert page.clicked.count("lower_hand_button") == 1
+    assert await adapter.is_hand_raised() is False
+
+
+@pytest.mark.asyncio
+async def test_google_meet_hand_raise_uses_reactions_menu_fallback() -> None:
+    config = BrowserConfig(automation_mode="simulator")
+    adapter = GoogleMeetAdapter(BrowserController(config), config)
+    await adapter.navigate("https://meet.google.com/abc-defg-hij")
+    await adapter.join()
+    page = adapter.meet_page
+    assert isinstance(page, SimulatedPageDriver)
+    page.visible_keys.add("reactions_button")
+
+    await adapter.raise_hand()
+
+    assert "reactions_button" in page.clicked
+    assert "raise_hand_button" in page.clicked
+    assert await adapter.is_hand_raised() is True
+
+
+@pytest.mark.asyncio
 async def test_playwright_driver_reads_visible_speaker_labeled_captions() -> None:
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)

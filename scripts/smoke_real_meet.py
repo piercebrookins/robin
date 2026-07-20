@@ -14,6 +14,10 @@ TASK_REQUEST = (
     "Use the workspace files to compare actual 2024 quarterly results, identify the most "
     "important caveats, and make a concise cited presentation."
 )
+INVITATION_PHRASE = os.getenv(
+    "ROBIN_REAL_MEET_INVITATION_PHRASE",
+    "Robin, I see your hand is raised. Could you share?",
+)
 
 
 async def wait_for_audio_ready(runtime, timeout_s: float = 15.0):
@@ -75,11 +79,115 @@ def validate_smoke_evidence(evidence: dict) -> None:
         raise SystemExit("Missing cleanup event.")
 
 
+def find_task(state: dict, task_id: str) -> dict:
+    return next(task for task in state["tasks"] if task["id"] == task_id)
+
+
+def handoff_for_task(state: dict, task_id: str) -> dict:
+    handoff = state.get("presentation_handoff") or {}
+    if handoff.get("task_id") != task_id:
+        raise RuntimeError(f"Presentation handoff is not assigned to task {task_id}: {handoff}")
+    return handoff
+
+
+def validate_waiting_handoff(state: dict, task_id: str) -> None:
+    task = find_task(state, task_id)
+    if task["status"] != "READY_TO_PRESENT":
+        raise RuntimeError(f"Task is not ready to present: {task['status']}")
+    if not task.get("presentation_ready_at"):
+        raise RuntimeError("Ready task is missing presentation_ready_at.")
+    handoff = handoff_for_task(state, task_id)
+    if handoff.get("state") != "WAITING_FOR_INVITATION" or handoff.get("hand_raised") is not True:
+        raise RuntimeError(f"Robin did not raise its hand for the ready task: {handoff}")
+
+
+def saw_autonomous_handoff(events: list[dict], task_id: str) -> bool:
+    task_events = [event for event in events if event.get("task_id") == task_id]
+    required = {
+        "presentation.handoff.queued",
+        "meeting.hand.raised",
+        "presentation.invitation.detected",
+        "presentation.handoff.started",
+        "presentation.completed",
+    }
+    seen = {event.get("type") for event in task_events}
+    return required <= seen
+
+
 async def post(client: httpx.AsyncClient, path: str, body: dict | None = None) -> dict:
     response = await client.post(path, json=body or {})
     if not response.is_success:
         raise RuntimeError(f"{path} failed: {response.text}")
     return response.json()
+
+
+async def get_json(client: httpx.AsyncClient, path: str) -> dict:
+    response = await client.get(path)
+    response.raise_for_status()
+    return response.json()
+
+
+async def wait_for_ready_handoff(
+    client: httpx.AsyncClient, task_id: str, timeout_s: float = 180.0
+) -> dict:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        state = await get_json(client, "/api/state")
+        task = find_task(state, task_id)
+        if task["status"] in {"FAILED", "CANCELLED"}:
+            raise RuntimeError(f"Task did not become ready: {task['status']} {task.get('error')}")
+        handoff = state.get("presentation_handoff") or {}
+        if (
+            task["status"] == "READY_TO_PRESENT"
+            and handoff.get("task_id") == task_id
+            and handoff.get("state") == "WAITING_FOR_INVITATION"
+            and handoff.get("hand_raised") is True
+        ):
+            validation = [
+                artifact
+                for artifact in state["artifacts"]
+                if artifact["task_id"] == task_id and artifact["type"] == "validation_json"
+            ]
+            if not validation:
+                raise RuntimeError("Task became ready without validation evidence.")
+            validate_waiting_handoff(state, task_id)
+            return state
+        await asyncio.sleep(0.5)
+    raise RuntimeError("Robin did not become ready with hand raised before the deadline.")
+
+
+async def wait_for_transcribed_invitation(
+    client: httpx.AsyncClient, phrase: str, timeout_s: float = 60.0
+) -> dict:
+    deadline = time.monotonic() + timeout_s
+    wanted = normalize(phrase)
+    while time.monotonic() < deadline:
+        state = await get_json(client, "/api/state")
+        for segment in reversed(state.get("transcript", [])):
+            if segment.get("source") in {"audio_stt", "merged"} and wanted in normalize(
+                segment.get("text", "")
+            ):
+                return segment
+        await asyncio.sleep(0.25)
+    raise RuntimeError(f"Did not hear the second participant invitation: {phrase}")
+
+
+async def wait_for_autonomous_completion(
+    client: httpx.AsyncClient, task_id: str, timeout_s: float = 180.0
+) -> dict:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        state = await get_json(client, "/api/state")
+        task = find_task(state, task_id)
+        if task["status"] == "COMPLETED":
+            events = await get_json(client, "/api/events?limit=500")
+            if not saw_autonomous_handoff(events, task_id):
+                raise RuntimeError("Task completed without the expected handoff event chain.")
+            return state
+        if task["status"] in {"FAILED", "CANCELLED"}:
+            raise RuntimeError(f"Presentation did not complete: {task['status']} {task.get('error')}")
+        await asyncio.sleep(0.5)
+    raise RuntimeError("Autonomous handoff presentation did not complete before the deadline.")
 
 
 async def main() -> None:
@@ -88,7 +196,7 @@ async def main() -> None:
         raise SystemExit("Set ROBIN_REAL_MEET_URL to a live Google Meet URL before running this smoke.")
     async with httpx.AsyncClient(base_url=CORE_URL, timeout=240) as client:
         try:
-            initial = (await client.get("/api/state")).raise_for_status().json()
+            initial = await get_json(client, "/api/state")
         except Exception as exc:
             raise SystemExit(
                 f"Robin core is not running at {CORE_URL}. Start it with `make robin`."
@@ -99,7 +207,7 @@ async def main() -> None:
             await post(
                 client,
                 "/api/meeting/join",
-                {"meeting_url": meeting_url, "start_listening": False},
+                {"meeting_url": meeting_url, "start_listening": True},
             )
             created = await post(
                 client,
@@ -113,29 +221,15 @@ async def main() -> None:
             if len(new_tasks) != 1:
                 raise RuntimeError(f"Expected one new task, found {len(new_tasks)}.")
             task_id = new_tasks[0]["id"]
-            deadline = time.monotonic() + 180
-            while time.monotonic() < deadline:
-                state = (await client.get("/api/state")).raise_for_status().json()
-                task = next(task for task in state["tasks"] if task["id"] == task_id)
-                if task["status"] == "READY_TO_PRESENT":
-                    validation = [
-                        artifact
-                        for artifact in state["artifacts"]
-                        if artifact["task_id"] == task_id
-                        and artifact["type"] == "validation_json"
-                    ]
-                    if not validation:
-                        raise RuntimeError("Task became ready without validation evidence.")
-                    break
-                if task["status"] in {"FAILED", "CANCELLED"}:
-                    raise RuntimeError(
-                        f"Task did not become ready: {task['status']} {task.get('error')}"
-                    )
-                await asyncio.sleep(0.5)
-            else:
-                raise RuntimeError("Task did not become ready within 180 seconds.")
-            await post(client, f"/api/tasks/{task_id}/present")
-            print(f"Real Meet smoke passed through the live core API: task={task_id}")
+            await wait_for_ready_handoff(client, task_id)
+            print(
+                "\nRobin's hand should now be raised. From the second participant account, say:\n"
+                f"  {INVITATION_PHRASE}\n",
+                flush=True,
+            )
+            await wait_for_transcribed_invitation(client, INVITATION_PHRASE)
+            await wait_for_autonomous_completion(client, task_id)
+            print(f"Real Meet handoff smoke passed: task={task_id}")
         finally:
             try:
                 await post(client, "/api/presentations/stop")

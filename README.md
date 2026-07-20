@@ -244,6 +244,10 @@ Run a real Meet smoke:
 ROBIN_REAL_MEET_URL=https://meet.google.com/... make smoke-real-meet
 ```
 
+The smoke now verifies the presentation hand-raise handoff: Robin joins and listens, completes a
+validated deck, raises its Meet hand, waits for the second participant to say the printed invitation
+phrase, then shares and narrates without the dashboard **Present now (override)** action.
+
 Run the operator-facing rehearsal:
 
 ```bash
@@ -260,8 +264,9 @@ make robin
 4. Select **Join & listen**.
 5. Use **Test Robin voice** and **Test hearing (4 sec)** before the first real rehearsal.
 6. Ask a complete delegated request containing `Robin`.
-7. Watch task state, artifacts, transcript, health, and presentation controls in the dashboard.
-8. Let Robin leave normally or use the emergency stop if the rehearsal needs to halt.
+7. Wait for Robin's Meet hand to raise, then invite it to present from another participant account.
+8. Watch task state, artifacts, transcript, health, and handoff status in the dashboard.
+9. Let Robin leave normally or use the emergency stop if the rehearsal needs to halt.
 
 Example prompt inside the meeting:
 

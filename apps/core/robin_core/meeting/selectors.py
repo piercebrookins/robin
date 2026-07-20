@@ -48,6 +48,25 @@ MEET_SELECTORS: dict[str, list[SelectorCandidate]] = {
         SelectorCandidate(role="button", name_regex=r"Present now|Share screen|Present"),
         SelectorCandidate(test_id="present-button"),
     ],
+    "reactions_button": [
+        SelectorCandidate(role="button", name_regex=r"Reactions|Activities"),
+        SelectorCandidate(test_id="reactions-button"),
+    ],
+    "raise_hand_button": [
+        SelectorCandidate(role="button", name_regex=r"Raise hand"),
+        SelectorCandidate(role="menuitem", name_regex=r"Raise hand"),
+        SelectorCandidate(test_id="raise-hand-button"),
+    ],
+    "lower_hand_button": [
+        SelectorCandidate(role="button", name_regex=r"Lower hand"),
+        SelectorCandidate(role="menuitem", name_regex=r"Lower hand"),
+        SelectorCandidate(test_id="lower-hand-button"),
+    ],
+    "hand_raised_signal": [
+        SelectorCandidate(text_regex=r"Your hand is raised|You raised your hand"),
+        SelectorCandidate(role="button", name_regex=r"Lower hand"),
+        SelectorCandidate(test_id="hand-raised-signal"),
+    ],
     "share_tab_option": [
         SelectorCandidate(role="menuitem", name_regex=r"A tab|Chrome tab|Share a tab"),
         SelectorCandidate(role="button", name_regex=r"A tab|Chrome tab|Share a tab"),
