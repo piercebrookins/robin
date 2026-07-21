@@ -184,6 +184,33 @@ async def test_playwright_driver_reads_visible_speaker_labeled_captions() -> Non
 
 
 @pytest.mark.asyncio
+async def test_playwright_driver_reads_current_meet_caption_rows() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(
+            """
+            <div class="nMcdL bj4p3b">
+              <div><span>Pierce Brookins</span></div>
+              <div class="ygicle VbkSUe">
+                Hey Robin. I see your hand is raised. Robin, can you share?
+              </div>
+            </div>
+            """
+        )
+
+        captions = await PlaywrightPageDriver(page).read_captions()
+
+        assert captions == [
+            CaptionTurn(
+                "Pierce Brookins",
+                "Hey Robin. I see your hand is raised. Robin, can you share?",
+            )
+        ]
+        await browser.close()
+
+
+@pytest.mark.asyncio
 async def test_google_meet_join_recovers_an_existing_joined_tab() -> None:
     config = BrowserConfig(automation_mode="simulator")
     adapter = GoogleMeetAdapter(BrowserController(config), config)

@@ -101,6 +101,7 @@ class RobinRuntime:
         self._subscribers: set[asyncio.Queue[RuntimeSnapshot]] = set()
         self._event_subscribers: set[asyncio.Queue[EventEnvelope]] = set()
         self._listen_handle: asyncio.Task | None = None
+        self._caption_watch_handle: asyncio.Task | None = None
         self._join_lock = asyncio.Lock()
         self._speech_lock = asyncio.Lock()
         self._capture_lock = asyncio.Lock()
@@ -118,6 +119,7 @@ class RobinRuntime:
         self._last_silence_event_at_ms: int = 0
         self._realtime_partials: dict[str, str] = {}
         self._realtime_barge_in_items: set[str] = set()
+        self._seen_caption_turns: set[tuple[str, str]] = set()
         self._active_spoken_text: str | None = None
         self._meet_recovery_event_count = 0
         self._meet_speech_route_event_count = 0
@@ -936,6 +938,7 @@ class RobinRuntime:
         max_iterations: int | None = None,
     ) -> RuntimeSnapshot:
         if self._listen_handle and not self._listen_handle.done():
+            self._ensure_caption_watch()
             return self.snapshot()
         self._listen_handle = asyncio.create_task(
             self._realtime_listening_loop(
@@ -954,6 +957,8 @@ class RobinRuntime:
                 max_iterations=max_iterations,
             )
         )
+        self._seen_caption_turns.clear()
+        self._ensure_caption_watch()
         if self.meeting_state == MeetingState.IDLE:
             self.meeting_state = MeetingState.LISTENING
         await self.emit_event(
@@ -970,6 +975,11 @@ class RobinRuntime:
         return await self.publish()
 
     async def stop_listening_loop(self) -> RuntimeSnapshot:
+        if self._caption_watch_handle and not self._caption_watch_handle.done():
+            self._caption_watch_handle.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._caption_watch_handle
+        self._caption_watch_handle = None
         if self._listen_handle and not self._listen_handle.done():
             self._listen_handle.cancel()
             with suppress(asyncio.CancelledError):
@@ -977,6 +987,66 @@ class RobinRuntime:
         self._listen_handle = None
         await self.emit_event("audio.listen.stopped", {}, component="audio")
         return await self.publish()
+
+    def _ensure_caption_watch(self) -> None:
+        if self._caption_watch_handle and not self._caption_watch_handle.done():
+            return
+        self._caption_watch_handle = asyncio.create_task(self._caption_invitation_loop())
+
+    async def _caption_invitation_loop(self) -> None:
+        """Use visible Meet captions when native audio misses a floor invitation."""
+
+        failures = 0
+        while True:
+            try:
+                await self._ingest_caption_invitation_once()
+                failures = 0
+                await asyncio.sleep(0.25)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failures += 1
+                if failures == 1 or failures % 20 == 0:
+                    await self.emit_event(
+                        "audio.caption.watch.failed",
+                        {"error": str(exc), "consecutive_failures": failures},
+                        component="audio",
+                    )
+                    await self.publish()
+                await asyncio.sleep(1)
+
+    async def _ingest_caption_invitation_once(self) -> bool:
+        pending = self._pending_presentation_context()
+        if not pending or pending.get("state") != "WAITING_FOR_INVITATION":
+            return False
+        captions = await asyncio.wait_for(self.meet.recent_captions(), timeout=1.0)
+        for caption in captions:
+            speaker = " ".join(caption.speaker_name.split())
+            text = " ".join(caption.text.split())
+            key = (speaker.casefold(), text.casefold())
+            if not text or key in self._seen_caption_turns:
+                continue
+            self._seen_caption_turns.add(key)
+            intent = await self.intent.classify(
+                text,
+                self._active_tasks(),
+                pending_presentation=pending,
+            )
+            if intent.classification != "presentation_invitation":
+                continue
+            await self.emit_event(
+                "audio.caption.invitation_fallback",
+                {"speaker_name": speaker, "text": text},
+                task_id=self.presentation_handoff.task_id,
+                component="audio",
+            )
+            await self.ingest_transcript(
+                text,
+                speaker_name=speaker or "Meet participant",
+                source="meet_caption",
+            )
+            return True
+        return False
 
     async def run_browser_operator(
         self,
@@ -1682,8 +1752,7 @@ class RobinRuntime:
             raise ValueError("Task has no presentation artifact.")
         deck_spec = self._load_deck(task_id, revision=task.revision)
         narrations = [
-            self._slide_narration(deck_spec, index)
-            for index in range(len(deck_spec.slides))
+            self._slide_narration(deck_spec, index) for index in range(len(deck_spec.slides))
         ]
         prefetch: NarrationPrefetchCoordinator | None = None
         if self.settings.presentation.narration_prefetch_enabled:
@@ -1855,8 +1924,7 @@ class RobinRuntime:
         prefetch: NarrationPrefetchCoordinator | None = None,
     ) -> None:
         narration_texts = narrations or [
-            self._slide_narration(deck, index)
-            for index in range(len(deck.slides))
+            self._slide_narration(deck, index) for index in range(len(deck.slides))
         ]
         async with self._presentation_speech_session(task_id):
             for index, slide in enumerate(deck.slides):
@@ -1959,12 +2027,9 @@ class RobinRuntime:
 
     async def _handle_intent(self, segment: TranscriptSegment) -> None:
         pending_presentation = self._pending_presentation_context()
-        if (
-            not self._contains_wake_word(segment.text)
-            and (
-                pending_presentation is None
-                or self.settings.presentation.require_wake_word_for_invitation
-            )
+        if not self._contains_wake_word(segment.text) and (
+            pending_presentation is None
+            or self.settings.presentation.require_wake_word_for_invitation
         ):
             await self.emit_event(
                 "conversation.ignored",
@@ -2535,7 +2600,9 @@ class RobinRuntime:
                     await self._emit_meet_recovery_events(task_id)
                 finally:
                     self._active_spoken_text = None
-                    self.meeting_state = previous if previous != MeetingState.IDLE else self.meet.state
+                    self.meeting_state = (
+                        previous if previous != MeetingState.IDLE else self.meet.state
+                    )
                     await self.publish()
 
     @asynccontextmanager

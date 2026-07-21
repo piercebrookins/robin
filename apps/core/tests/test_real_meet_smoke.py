@@ -200,3 +200,16 @@ def test_saw_autonomous_handoff_requires_invitation_and_completion_events() -> N
 
     assert smoke_real_meet.saw_autonomous_handoff(events, task_id) is True
     assert smoke_real_meet.saw_autonomous_handoff(events[:-1], task_id) is False
+
+
+def test_saw_invitation_detected_accepts_caption_backed_event() -> None:
+    events = [
+        {
+            "type": "presentation.invitation.detected",
+            "task_id": "task-1",
+            "payload": {"source": "meet_caption"},
+        }
+    ]
+
+    assert smoke_real_meet.saw_invitation_detected(events, "task-1") is True
+    assert smoke_real_meet.saw_invitation_detected(events, "task-2") is False

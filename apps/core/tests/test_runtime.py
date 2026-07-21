@@ -31,7 +31,6 @@ from robin_core.schemas import (
     SlideSpec,
     SourceCitation,
     RuntimeState,
-    SlideSpec,
     SpeechRecord,
     TaskOutcomeState,
     TaskStatus,
@@ -310,6 +309,50 @@ async def test_invitation_lowers_hand_and_presents_once(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_visible_meet_caption_recovers_missed_audio_invitation(tmp_path: Path) -> None:
+    runtime = _runtime_for_handoff_fixture(tmp_path)
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    task = _ready_task_with_deck(runtime, "Ready deck")
+    await runtime.request_presentation_floor(task.id, task.revision)
+    page = runtime.meet.meet_page
+    assert isinstance(page, SimulatedPageDriver)
+    page.caption_turns = [
+        CaptionTurn("Avery", "Robin, I see your hand is raised. Could you share?")
+    ]
+
+    recovered = await runtime._ingest_caption_invitation_once()
+
+    assert recovered is True
+    assert task.status == TaskStatus.COMPLETED
+    assert runtime.transcript[-1].source == "meet_caption"
+    assert runtime.transcript[-1].speaker_name == "Avery"
+    assert any(
+        event.type == "audio.caption.invitation_fallback" for event in runtime.recent_events(200)
+    )
+
+
+@pytest.mark.asyncio
+async def test_meet_caption_fallback_ignores_non_invitation_and_deduplicates(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime_for_handoff_fixture(tmp_path)
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    task = _ready_task_with_deck(runtime, "Ready deck")
+    await runtime.request_presentation_floor(task.id, task.revision)
+    page = runtime.meet.meet_page
+    assert isinstance(page, SimulatedPageDriver)
+    page.caption_turns = [CaptionTurn("Avery", "Robin has a deck ready.")]
+
+    first = await runtime._ingest_caption_invitation_once()
+    second = await runtime._ingest_caption_invitation_once()
+
+    assert first is False
+    assert second is False
+    assert runtime.transcript == []
+    assert runtime.presentation_handoff.state == PresentationHandoffState.WAITING_FOR_INVITATION
+
+
+@pytest.mark.asyncio
 async def test_non_invitation_turn_leaves_hand_raised(tmp_path: Path) -> None:
     runtime = _runtime_for_handoff_fixture(tmp_path)
     await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
@@ -352,8 +395,7 @@ async def test_runtime_can_relax_wake_word_for_pending_presentation_invitation(
     assert task.status == TaskStatus.COMPLETED
     assert runtime.presentation_handoff.state == PresentationHandoffState.IDLE
     assert not any(
-        event.type == "conversation.ignored"
-        and event.payload.get("reason") == "wake_word_missing"
+        event.type == "conversation.ignored" and event.payload.get("reason") == "wake_word_missing"
         for event in runtime.recent_events(100)
     )
 
@@ -398,7 +440,9 @@ async def test_duplicate_invitation_segment_cannot_start_twice(tmp_path: Path) -
         ),
     )
 
-    assert sum(1 for event in runtime.recent_events(200) if event.type == "presentation.started") == 1
+    assert (
+        sum(1 for event in runtime.recent_events(200) if event.type == "presentation.started") == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -1054,8 +1098,7 @@ async def test_interrupted_deck_narration_stops_subsequent_slides(tmp_path: Path
     assert [speech.text for speech in runtime.speech[-1:]] == ["interrupted narration"]
     assert runtime.presentations[task_id].active_slide == 0
     assert any(
-        event.type == "presentation.narration.interrupted"
-        for event in runtime.recent_events(100)
+        event.type == "presentation.narration.interrupted" for event in runtime.recent_events(100)
     )
     assert runtime.meet.muted is True
 

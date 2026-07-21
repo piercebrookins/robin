@@ -25,7 +25,11 @@ async def wait_for_audio_ready(runtime, timeout_s: float = 15.0):
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         state = getattr(getattr(runtime, "audio", None), "runtime_state", None)
-        if state is not None and state.capture_state == "capturing" and state.transcription_state == "connected":
+        if (
+            state is not None
+            and state.capture_state == "capturing"
+            and state.transcription_state == "connected"
+        ):
             return state
         await asyncio.sleep(0.1)
     raise RuntimeError("Live audio capture/transcription did not become ready in time.")
@@ -57,12 +61,18 @@ def validate_smoke_evidence(evidence: dict) -> None:
     if participant.get("source") != "audio_stt":
         raise SystemExit("Participant transcript did not come from audio STT.")
     before = evidence.get("audio_before_cleanup") or {}
-    if before.get("capture_state") != "capturing" or before.get("transcription_state") != "connected":
+    if (
+        before.get("capture_state") != "capturing"
+        or before.get("transcription_state") != "connected"
+    ):
         raise SystemExit("Audio was not live during the smoke.")
     if before.get("last_frame_timestamp_ms") is None or before.get("last_frame_sequence") is None:
         raise SystemExit("Audio was not live during the smoke.")
     after = evidence.get("audio_after_cleanup") or {}
-    if any(after.get(key) != "idle" for key in ("capture_state", "transcription_state", "playback_state")):
+    if any(
+        after.get(key) != "idle"
+        for key in ("capture_state", "transcription_state", "playback_state")
+    ):
         raise SystemExit(f"Audio did not stop cleanly: {after}")
     if evidence.get("cleanup_elapsed_ms", 999999) > 2000:
         raise SystemExit("Audio cleanup exceeded two seconds.")
@@ -71,7 +81,9 @@ def validate_smoke_evidence(evidence: dict) -> None:
     if evidence.get("transcription_session_active_after_cleanup"):
         raise SystemExit("Transcription session still active after cleanup.")
     if evidence.get("bridge_process_alive_after_cleanup"):
-        raise SystemExit(f"Bridge process still alive: pid={evidence.get('bridge_pid_before_cleanup')}")
+        raise SystemExit(
+            f"Bridge process still alive: pid={evidence.get('bridge_pid_before_cleanup')}"
+        )
     if not any(
         event.get("type") in {"runtime.emergency_stop", "meeting.leave.cleanup"}
         for event in evidence.get("recent_events", [])
@@ -156,20 +168,28 @@ async def wait_for_ready_handoff(
     raise RuntimeError("Robin did not become ready with hand raised before the deadline.")
 
 
-async def wait_for_transcribed_invitation(
-    client: httpx.AsyncClient, phrase: str, timeout_s: float = 60.0
+def saw_invitation_detected(events: list[dict], task_id: str) -> bool:
+    return any(
+        event.get("type") == "presentation.invitation.detected" and event.get("task_id") == task_id
+        for event in events
+    )
+
+
+async def wait_for_invitation_detected(
+    client: httpx.AsyncClient, task_id: str, timeout_s: float = 60.0
 ) -> dict:
     deadline = time.monotonic() + timeout_s
-    wanted = normalize(phrase)
     while time.monotonic() < deadline:
-        state = await get_json(client, "/api/state")
-        for segment in reversed(state.get("transcript", [])):
-            if segment.get("source") in {"audio_stt", "merged"} and wanted in normalize(
-                segment.get("text", "")
-            ):
-                return segment
+        events = await get_json(client, "/api/events?limit=500")
+        if saw_invitation_detected(events, task_id):
+            return next(
+                event
+                for event in reversed(events)
+                if event.get("type") == "presentation.invitation.detected"
+                and event.get("task_id") == task_id
+            )
         await asyncio.sleep(0.25)
-    raise RuntimeError(f"Did not hear the second participant invitation: {phrase}")
+    raise RuntimeError("Robin did not detect a second-participant presentation invitation.")
 
 
 async def wait_for_autonomous_completion(
@@ -185,7 +205,9 @@ async def wait_for_autonomous_completion(
                 raise RuntimeError("Task completed without the expected handoff event chain.")
             return state
         if task["status"] in {"FAILED", "CANCELLED"}:
-            raise RuntimeError(f"Presentation did not complete: {task['status']} {task.get('error')}")
+            raise RuntimeError(
+                f"Presentation did not complete: {task['status']} {task.get('error')}"
+            )
         await asyncio.sleep(0.5)
     raise RuntimeError("Autonomous handoff presentation did not complete before the deadline.")
 
@@ -193,7 +215,9 @@ async def wait_for_autonomous_completion(
 async def main() -> None:
     meeting_url = os.getenv("ROBIN_REAL_MEET_URL")
     if not meeting_url:
-        raise SystemExit("Set ROBIN_REAL_MEET_URL to a live Google Meet URL before running this smoke.")
+        raise SystemExit(
+            "Set ROBIN_REAL_MEET_URL to a live Google Meet URL before running this smoke."
+        )
     async with httpx.AsyncClient(base_url=CORE_URL, timeout=240) as client:
         try:
             initial = await get_json(client, "/api/state")
@@ -227,7 +251,7 @@ async def main() -> None:
                 f"  {INVITATION_PHRASE}\n",
                 flush=True,
             )
-            await wait_for_transcribed_invitation(client, INVITATION_PHRASE)
+            await wait_for_invitation_detected(client, task_id)
             await wait_for_autonomous_completion(client, task_id)
             print(f"Real Meet handoff smoke passed: task={task_id}")
         finally:
