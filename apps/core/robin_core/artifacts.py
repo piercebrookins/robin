@@ -9,7 +9,9 @@ import pandas as pd
 import plotly.graph_objects as go
 from pptx import Presentation
 from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import PP_ALIGN
+from pptx.enum.text import MSO_ANCHOR
 from pptx.util import Inches, Pt
 
 from .schemas import (
@@ -32,7 +34,9 @@ class ArtifactWorker:
         self.workspace = workspace
         self.presentation_base_url = presentation_base_url.rstrip("/")
 
-    def run_finance_analysis(self, task: RobinTask, files: list[Path]) -> tuple[list[Artifact], ChartSpec, DeckSpec, ValidationReport]:
+    def run_finance_analysis(
+        self, task: RobinTask, files: list[Path]
+    ) -> tuple[list[Artifact], ChartSpec, DeckSpec, ValidationReport]:
         tables = [path for path in files if path.suffix.lower() in {".csv", ".xlsx"}]
         if not tables:
             raise ValueError("No CSV or XLSX finance data found in the approved workspace.")
@@ -54,7 +58,9 @@ class ArtifactWorker:
         pdf_citations, pdf_notes = self._pdf_context(files)
         chart = self._chart_from_frame(df, source_path)
         deck = self._deck_from_analysis(task, chart, df, table_path, pdf_citations, pdf_notes)
-        validation = self._validate_analysis(task, chart, deck, df, source_path, [citation.path for citation in pdf_citations])
+        validation = self._validate_analysis(
+            task, chart, deck, df, source_path, [citation.path for citation in pdf_citations]
+        )
         artifacts = self._write_artifacts(task.id, chart, deck, validation)
         return artifacts, chart, deck, validation
 
@@ -169,9 +175,7 @@ class ArtifactWorker:
             lines.extend(f"- **{label}:** {value}" for label, value in slide.metrics.items())
             lines.append("")
         lines.extend(["## Source files", ""])
-        lines.extend(
-            f"- `{source.path}` — {source.note}" for source in result.deliverable.sources
-        )
+        lines.extend(f"- `{source.path}` — {source.note}" for source in result.deliverable.sources)
         return "\n".join(lines).rstrip() + "\n"
 
     def _choose_table(self, paths: list[Path]) -> Path:
@@ -231,7 +235,9 @@ class ArtifactWorker:
                 notes.append(f"Supporting context from {path.name}: {compact[:180]}")
             else:
                 notes.append(f"Supporting context from {path.name}: no extractable text found.")
-            citations.append(SourceCitation(label=path.name, path=rel, note="Supporting PDF context"))
+            citations.append(
+                SourceCitation(label=path.name, path=rel, note="Supporting PDF context")
+            )
         return citations, notes
 
     def _deck_from_analysis(
@@ -272,7 +278,9 @@ class ArtifactWorker:
                     title="Executive Summary",
                     body=executive_body,
                 ),
-                SlideSpec(type="chart", title=chart.title, chart_id=chart.id, body=[chart.subtitle or ""]),
+                SlideSpec(
+                    type="chart", title=chart.title, chart_id=chart.id, body=[chart.subtitle or ""]
+                ),
                 SlideSpec(
                     type="key_metrics",
                     title="Key Metrics",
@@ -289,7 +297,11 @@ class ArtifactWorker:
                 ),
             ],
             sources=[
-                SourceCitation(label=source.name, path=source.relative_to(self.workspace.root).as_posix(), note="Primary structured source"),
+                SourceCitation(
+                    label=source.name,
+                    path=source.relative_to(self.workspace.root).as_posix(),
+                    note="Primary structured source",
+                ),
                 *pdf_citations,
             ],
         )
@@ -328,9 +340,14 @@ class ArtifactWorker:
                     actual=sorted(scenarios),
                 )
             )
-        expected_margin = (df["operating_income"].astype(float) / df["revenue"].astype(float)).tolist()
+        expected_margin = (
+            df["operating_income"].astype(float) / df["revenue"].astype(float)
+        ).tolist()
         actual_margin = df["operating_margin"].astype(float).tolist()
-        margin_deltas = [abs(expected - actual) for expected, actual in zip(expected_margin, actual_margin, strict=False)]
+        margin_deltas = [
+            abs(expected - actual)
+            for expected, actual in zip(expected_margin, actual_margin, strict=False)
+        ]
         max_margin_delta = max(margin_deltas, default=0.0)
         checks.append(
             ValidationCheck(
@@ -342,9 +359,14 @@ class ArtifactWorker:
                 actual=[round(value, 6) for value in actual_margin],
             )
         )
-        revenue_series = next((series for series in chart.series if series.name == "Revenue ($M)"), None)
+        revenue_series = next(
+            (series for series in chart.series if series.name == "Revenue ($M)"), None
+        )
         expected_revenue = [float(value) / 1_000_000 for value in df["revenue"].tolist()]
-        revenue_ok = bool(revenue_series) and all(abs(expected - actual) < 0.0001 for expected, actual in zip(expected_revenue, revenue_series.y, strict=False))
+        revenue_ok = bool(revenue_series) and all(
+            abs(expected - actual) < 0.0001
+            for expected, actual in zip(expected_revenue, revenue_series.y, strict=False)
+        )
         checks.append(
             ValidationCheck(
                 name="chart_revenue_series",
@@ -355,9 +377,14 @@ class ArtifactWorker:
                 actual=[round(value, 6) for value in revenue_series.y] if revenue_series else None,
             )
         )
-        margin_series = next((series for series in chart.series if series.name == "Operating margin (%)"), None)
+        margin_series = next(
+            (series for series in chart.series if series.name == "Operating margin (%)"), None
+        )
         expected_margin_percent = [float(value) * 100 for value in df["operating_margin"].tolist()]
-        margin_series_ok = bool(margin_series) and all(abs(expected - actual) < 0.0001 for expected, actual in zip(expected_margin_percent, margin_series.y, strict=False))
+        margin_series_ok = bool(margin_series) and all(
+            abs(expected - actual) < 0.0001
+            for expected, actual in zip(expected_margin_percent, margin_series.y, strict=False)
+        )
         checks.append(
             ValidationCheck(
                 name="chart_margin_series",
@@ -371,7 +398,8 @@ class ArtifactWorker:
         checks.append(
             ValidationCheck(
                 name="deck_structure",
-                ok=3 <= len(deck.slides) <= 6 and any(slide.type == "sources" for slide in deck.slides),
+                ok=3 <= len(deck.slides) <= 6
+                and any(slide.type == "sources" for slide in deck.slides),
                 detail="Deck has a concise slide count and includes a sources slide.",
                 expected="3-6 slides with sources",
                 actual=f"{len(deck.slides)} slides",
@@ -380,7 +408,10 @@ class ArtifactWorker:
         checks.append(
             ValidationCheck(
                 name="lineage_present",
-                ok=bool(chart.lineage) and any(item.get("source") == source for item in chart.lineage if isinstance(item, dict)),
+                ok=bool(chart.lineage)
+                and any(
+                    item.get("source") == source for item in chart.lineage if isinstance(item, dict)
+                ),
                 detail="Chart lineage points back to the source file.",
                 source=source,
                 expected=source,
@@ -391,7 +422,8 @@ class ArtifactWorker:
         checks.append(
             ValidationCheck(
                 name="source_citations_present",
-                ok=source in cited_paths and all(path in cited_paths for path in supporting_sources),
+                ok=source in cited_paths
+                and all(path in cited_paths for path in supporting_sources),
                 detail="Deck cites the structured source and any supporting PDF context.",
                 source=source,
                 expected=[source, *supporting_sources],
@@ -405,7 +437,9 @@ class ArtifactWorker:
             source_paths=[source, *supporting_sources],
         )
 
-    def _write_artifacts(self, task_id: UUID, chart: ChartSpec, deck: DeckSpec, validation: ValidationReport) -> list[Artifact]:
+    def _write_artifacts(
+        self, task_id: UUID, chart: ChartSpec, deck: DeckSpec, validation: ValidationReport
+    ) -> list[Artifact]:
         out = self.workspace.generated_task_dir(str(task_id))
         revision = deck.revision
         chart_json = out / f"chart_v{revision}.json"
@@ -419,8 +453,18 @@ class ArtifactWorker:
         self._render_png(chart, chart_png)
         self._render_pptx(deck, chart_png, deck_pptx)
         return [
-            Artifact(task_id=task_id, revision=revision, type="chart_json", path=chart_json.relative_to(self.workspace.root).as_posix()),
-            Artifact(task_id=task_id, revision=revision, type="chart_png", path=chart_png.relative_to(self.workspace.root).as_posix()),
+            Artifact(
+                task_id=task_id,
+                revision=revision,
+                type="chart_json",
+                path=chart_json.relative_to(self.workspace.root).as_posix(),
+            ),
+            Artifact(
+                task_id=task_id,
+                revision=revision,
+                type="chart_png",
+                path=chart_png.relative_to(self.workspace.root).as_posix(),
+            ),
             Artifact(
                 task_id=task_id,
                 revision=revision,
@@ -428,46 +472,310 @@ class ArtifactWorker:
                 path=deck_json.relative_to(self.workspace.root).as_posix(),
                 url=f"{self.presentation_base_url}/{task_id}?revision={revision}",
             ),
-            Artifact(task_id=task_id, revision=revision, type="deck_pptx", path=deck_pptx.relative_to(self.workspace.root).as_posix()),
-            Artifact(task_id=task_id, revision=revision, type="validation_json", path=validation_json.relative_to(self.workspace.root).as_posix()),
+            Artifact(
+                task_id=task_id,
+                revision=revision,
+                type="deck_pptx",
+                path=deck_pptx.relative_to(self.workspace.root).as_posix(),
+            ),
+            Artifact(
+                task_id=task_id,
+                revision=revision,
+                type="validation_json",
+                path=validation_json.relative_to(self.workspace.root).as_posix(),
+            ),
         ]
 
     def _render_pptx(self, deck: DeckSpec, chart_png: Path | None, path: Path) -> None:
         prs = Presentation()
         prs.slide_width = Inches(13.333)
         prs.slide_height = Inches(7.5)
-        for slide_spec in deck.slides:
+        for slide_number, slide_spec in enumerate(deck.slides, start=1):
             slide = prs.slides.add_slide(prs.slide_layouts[6])
-            self._add_slide_title(slide, slide_spec.title)
+            self._set_background(slide, self._NAVY if slide_spec.type == "title" else self._PAPER)
             if slide_spec.type == "title":
-                self._add_text_block(slide, slide_spec.body, left=0.8, top=2.1, width=11.8, height=3.8, font_size=28)
+                self._render_title_slide(slide, slide_spec, deck)
             elif slide_spec.type == "chart":
-                try:
-                    if chart_png is None:
-                        raise ValueError("No chart image was supplied")
-                    slide.shapes.add_picture(str(chart_png), Inches(0.8), Inches(1.35), width=Inches(11.8), height=Inches(5.4))
-                    self._add_text_block(slide, slide_spec.body[:1], left=0.8, top=6.85, width=11.8, height=0.35, font_size=12)
-                except Exception:
-                    self._add_text_block(slide, [*slide_spec.body, "Chart image export was unavailable; use the browser deck for the live chart."], left=0.95, top=1.45, width=11.4, height=5.7, font_size=21)
+                self._add_slide_title(slide, slide_spec.title)
+                self._render_chart_slide(slide, slide_spec, chart_png)
             elif slide_spec.type == "key_metrics":
-                metrics = [f"{label}: {value}" for label, value in slide_spec.metrics.items()]
-                self._add_text_block(slide, metrics or slide_spec.body, left=1.0, top=1.55, width=11.0, height=5.2, font_size=26)
+                self._add_slide_title(slide, slide_spec.title)
+                self._render_metrics_slide(slide, slide_spec)
+            elif slide_spec.type == "sources":
+                self._add_slide_title(slide, slide_spec.title)
+                self._render_sources_slide(slide, slide_spec, deck)
+            elif slide_spec.type == "methodology":
+                self._add_slide_title(slide, slide_spec.title)
+                self._render_methodology_slide(slide, slide_spec)
             else:
-                self._add_text_block(slide, slide_spec.body, left=0.95, top=1.45, width=11.4, height=5.7, font_size=21)
-            self._add_footer(slide, deck)
+                self._add_slide_title(slide, slide_spec.title)
+                self._render_statement_slide(slide, slide_spec)
+            if slide_spec.type != "title":
+                self._add_footer(slide, deck, slide_number, len(deck.slides))
         prs.save(path)
 
+    _NAVY = RGBColor(18, 29, 48)
+    _INK = RGBColor(25, 35, 52)
+    _MUTED = RGBColor(91, 103, 124)
+    _PAPER = RGBColor(247, 246, 242)
+    _WHITE = RGBColor(255, 255, 255)
+    _TEAL = RGBColor(33, 158, 145)
+    _CORAL = RGBColor(238, 110, 85)
+    _PALE_TEAL = RGBColor(224, 241, 237)
+    _LINE = RGBColor(215, 217, 214)
+
+    def _set_background(self, slide, color: RGBColor) -> None:
+        slide.background.fill.solid()
+        slide.background.fill.fore_color.rgb = color
+
+    def _add_shape(self, slide, shape_type, left, top, width, height, fill, line=None):
+        shape = slide.shapes.add_shape(
+            shape_type, Inches(left), Inches(top), Inches(width), Inches(height)
+        )
+        shape.fill.solid()
+        shape.fill.fore_color.rgb = fill
+        shape.line.color.rgb = line or fill
+        return shape
+
+    def _render_title_slide(self, slide, spec: SlideSpec, deck: DeckSpec) -> None:
+        self._add_shape(slide, MSO_SHAPE.RECTANGLE, 0, 0, 0.16, 7.5, self._TEAL)
+        self._add_shape(slide, MSO_SHAPE.RECTANGLE, 11.55, 0, 1.78, 7.5, RGBColor(25, 45, 68))
+        self._add_shape(slide, MSO_SHAPE.OVAL, 11.9, 0.65, 0.72, 0.72, self._CORAL)
+        self._add_text(slide, "ROBIN BRIEFING", 0.82, 0.72, 4.2, 0.35, 14, self._TEAL, bold=True)
+        self._add_text(slide, spec.title, 0.82, 1.55, 9.9, 2.1, 34, self._WHITE, bold=True)
+        if spec.body:
+            self._add_text(slide, spec.body[0], 0.86, 4.25, 8.9, 1.0, 20, RGBColor(207, 217, 226))
+        self._add_text(
+            slide, f"Revision {deck.revision}", 0.86, 6.55, 2.5, 0.3, 11, RGBColor(151, 168, 185)
+        )
+
+    def _render_statement_slide(self, slide, spec: SlideSpec) -> None:
+        lines = spec.body[:5]
+        if not lines:
+            return
+        if len(lines) == 1:
+            self._add_shape(
+                slide, MSO_SHAPE.ROUNDED_RECTANGLE, 0.82, 2.05, 11.65, 3.5, self._WHITE, self._LINE
+            )
+            self._add_text(
+                slide,
+                lines[0],
+                1.25,
+                2.55,
+                10.7,
+                2.15,
+                28,
+                self._INK,
+                bold=True,
+                valign=MSO_ANCHOR.MIDDLE,
+            )
+            return
+        left_lines, right_lines = lines[: (len(lines) + 1) // 2], lines[(len(lines) + 1) // 2 :]
+        self._render_numbered_column(slide, left_lines, 0.82, 1.62, 5.62)
+        if right_lines:
+            self._render_numbered_column(slide, right_lines, 6.73, 1.62, 5.62, len(left_lines))
+
+    def _render_numbered_column(self, slide, lines, left, top, width, offset=0) -> None:
+        row_height = min(1.42, 4.95 / max(len(lines), 1))
+        for index, line in enumerate(lines):
+            y = top + index * row_height
+            self._add_text(
+                slide,
+                f"{index + offset + 1:02d}",
+                left,
+                y + 0.04,
+                0.55,
+                0.35,
+                12,
+                self._TEAL,
+                bold=True,
+            )
+            self._add_text(
+                slide,
+                line,
+                left + 0.68,
+                y,
+                width - 0.68,
+                row_height - 0.12,
+                19,
+                self._INK,
+                bold=index == 0 and offset == 0,
+            )
+            if index < len(lines) - 1:
+                self._add_shape(
+                    slide,
+                    MSO_SHAPE.RECTANGLE,
+                    left + 0.68,
+                    y + row_height - 0.16,
+                    width - 0.68,
+                    0.012,
+                    self._LINE,
+                )
+
+    def _render_metrics_slide(self, slide, spec: SlideSpec) -> None:
+        metrics = list(spec.metrics.items())[:4]
+        if not metrics:
+            self._render_statement_slide(slide, spec)
+            return
+        count = len(metrics)
+        card_width = (11.65 - 0.28 * (count - 1)) / count
+        for index, (label, value) in enumerate(metrics):
+            x = 0.82 + index * (card_width + 0.28)
+            self._add_shape(
+                slide,
+                MSO_SHAPE.ROUNDED_RECTANGLE,
+                x,
+                1.72,
+                card_width,
+                3.35,
+                self._WHITE,
+                self._LINE,
+            )
+            self._add_shape(
+                slide,
+                MSO_SHAPE.RECTANGLE,
+                x,
+                1.72,
+                card_width,
+                0.09,
+                self._TEAL if index % 2 == 0 else self._CORAL,
+            )
+            size = 31 if len(value) <= 10 else 24
+            self._add_text(
+                slide,
+                value,
+                x + 0.24,
+                2.22,
+                card_width - 0.48,
+                1.0,
+                size,
+                self._INK,
+                bold=True,
+                valign=MSO_ANCHOR.MIDDLE,
+            )
+            self._add_text(
+                slide, label, x + 0.24, 3.46, card_width - 0.48, 0.8, 15, self._MUTED, bold=True
+            )
+        if spec.body:
+            self._add_text(slide, spec.body[0], 0.92, 5.55, 11.4, 0.68, 17, self._INK, bold=True)
+
+    def _render_chart_slide(self, slide, spec: SlideSpec, chart_png: Path | None) -> None:
+        try:
+            if chart_png is None or not chart_png.is_file() or chart_png.suffix.lower() != ".png":
+                raise ValueError("No chart image was supplied")
+            slide.shapes.add_picture(
+                str(chart_png), Inches(0.82), Inches(1.42), width=Inches(8.65), height=Inches(5.25)
+            )
+            if spec.body:
+                self._add_shape(
+                    slide,
+                    MSO_SHAPE.ROUNDED_RECTANGLE,
+                    9.72,
+                    1.62,
+                    2.62,
+                    4.65,
+                    self._PALE_TEAL,
+                    self._PALE_TEAL,
+                )
+                self._add_text(
+                    slide, "WHAT MATTERS", 10.02, 1.98, 2.05, 0.3, 11, self._TEAL, bold=True
+                )
+                self._add_text(
+                    slide, spec.body[0], 10.02, 2.48, 2.02, 2.8, 18, self._INK, bold=True
+                )
+        except Exception:
+            self._render_statement_slide(slide, spec)
+
+    def _render_methodology_slide(self, slide, spec: SlideSpec) -> None:
+        steps = spec.body[:5]
+        if not steps:
+            return
+        step_width = 10.9 / len(steps)
+        for index, step in enumerate(steps):
+            x = 0.95 + index * step_width
+            self._add_shape(
+                slide, MSO_SHAPE.OVAL, x, 2.02, 0.58, 0.58, self._TEAL if index == 0 else self._NAVY
+            )
+            self._add_text(
+                slide,
+                str(index + 1),
+                x,
+                2.07,
+                0.58,
+                0.3,
+                13,
+                self._WHITE,
+                bold=True,
+                align=PP_ALIGN.CENTER,
+            )
+            self._add_text(
+                slide, step, x, 2.92, step_width - 0.24, 2.25, 16, self._INK, bold=index == 0
+            )
+            if index < len(steps) - 1:
+                self._add_shape(
+                    slide, MSO_SHAPE.RECTANGLE, x + 0.65, 2.29, step_width - 0.78, 0.025, self._LINE
+                )
+
+    def _render_sources_slide(self, slide, spec: SlideSpec, deck: DeckSpec) -> None:
+        sources = deck.sources[:8]
+        for index, source in enumerate(sources):
+            column, row = index % 2, index // 2
+            x, y = 0.82 + column * 5.9, 1.52 + row * 1.2
+            self._add_text(
+                slide, f"{index + 1:02d}", x, y + 0.03, 0.5, 0.3, 11, self._TEAL, bold=True
+            )
+            self._add_text(slide, source.label, x + 0.58, y, 4.95, 0.34, 15, self._INK, bold=True)
+            self._add_text(
+                slide, source.note or source.path, x + 0.58, y + 0.4, 4.95, 0.5, 11, self._MUTED
+            )
+        if not sources:
+            self._add_text_block(slide, spec.body, 0.9, 1.55, 11.4, 4.8, 18)
+
     def _add_slide_title(self, slide, text: str) -> None:
-        box = slide.shapes.add_textbox(Inches(0.65), Inches(0.35), Inches(12.0), Inches(0.75))
+        self._add_text(slide, text, 0.82, 0.48, 11.65, 0.72, 27, self._INK, bold=True)
+        self._add_shape(slide, MSO_SHAPE.RECTANGLE, 0.82, 1.22, 0.72, 0.055, self._TEAL)
+
+    def _add_text(
+        self,
+        slide,
+        text,
+        left,
+        top,
+        width,
+        height,
+        font_size,
+        color,
+        *,
+        bold=False,
+        align=PP_ALIGN.LEFT,
+        valign=MSO_ANCHOR.TOP,
+    ):
+        box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
         frame = box.text_frame
         frame.clear()
+        frame.word_wrap = True
+        frame.margin_left = frame.margin_right = Inches(0.02)
+        frame.margin_top = frame.margin_bottom = Inches(0.02)
+        frame.vertical_anchor = valign
         paragraph = frame.paragraphs[0]
-        paragraph.text = text
-        paragraph.font.bold = True
-        paragraph.font.size = Pt(30)
-        paragraph.font.color.rgb = RGBColor(24, 33, 48)
+        paragraph.text = str(text)
+        paragraph.alignment = align
+        paragraph.font.name = "Aptos Display" if bold else "Aptos"
+        paragraph.font.bold = bold
+        paragraph.font.size = Pt(font_size)
+        paragraph.font.color.rgb = color
+        return box
 
-    def _add_text_block(self, slide, lines: list[str], left: float, top: float, width: float, height: float, font_size: int) -> None:
+    def _add_text_block(
+        self,
+        slide,
+        lines: list[str],
+        left: float,
+        top: float,
+        width: float,
+        height: float,
+        font_size: int,
+    ) -> None:
         box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
         frame = box.text_frame
         frame.word_wrap = True
@@ -481,13 +789,23 @@ class ArtifactWorker:
             if len(lines) > 1:
                 paragraph.level = 0
 
-    def _add_footer(self, slide, deck: DeckSpec) -> None:
-        box = slide.shapes.add_textbox(Inches(0.65), Inches(7.05), Inches(12.0), Inches(0.25))
-        paragraph = box.text_frame.paragraphs[0]
-        paragraph.text = f"Robin generated export · revision {deck.revision}"
-        paragraph.alignment = PP_ALIGN.RIGHT
-        paragraph.font.size = Pt(9)
-        paragraph.font.color.rgb = RGBColor(102, 112, 133)
+    def _add_footer(self, slide, deck: DeckSpec, slide_number: int, slide_count: int) -> None:
+        self._add_shape(slide, MSO_SHAPE.RECTANGLE, 0.82, 6.92, 11.65, 0.012, self._LINE)
+        self._add_text(
+            slide, f"ROBIN · REV {deck.revision}", 0.82, 7.02, 2.2, 0.2, 9, self._MUTED, bold=True
+        )
+        self._add_text(
+            slide,
+            f"{slide_number:02d} / {slide_count:02d}",
+            11.42,
+            7.02,
+            1.05,
+            0.2,
+            9,
+            self._MUTED,
+            bold=True,
+            align=PP_ALIGN.RIGHT,
+        )
 
     def _render_png(self, chart: ChartSpec, path: Path) -> None:
         fig = go.Figure()
