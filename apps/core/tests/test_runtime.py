@@ -353,6 +353,54 @@ async def test_meet_caption_fallback_ignores_non_invitation_and_deduplicates(
 
 
 @pytest.mark.asyncio
+async def test_stable_meet_caption_recovers_normal_spoken_request(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime_for_handoff_fixture(tmp_path)
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    page = runtime.meet.meet_page
+    assert isinstance(page, SimulatedPageDriver)
+    page.caption_turns = [CaptionTurn("Avery", "Older meeting discussion.")]
+
+    baseline = await runtime._ingest_caption_turn_once()
+    page.caption_turns.append(CaptionTurn("Avery", "Robin, summarize the finance files."))
+    first = await runtime._ingest_caption_turn_once()
+    key = ("avery", "robin, summarize the finance files.")
+    runtime._caption_candidates[key] -= 1.0
+    second = await runtime._ingest_caption_turn_once()
+
+    assert baseline is False
+    assert first is False
+    assert second is True
+    assert runtime.transcript[-1].text == "Robin, summarize the finance files."
+    assert runtime.transcript[-1].speaker_name == "Avery"
+    assert runtime.transcript[-1].source == "meet_caption"
+    assert any(
+        event.type == "audio.caption.transcript_fallback" for event in runtime.recent_events(100)
+    )
+
+
+@pytest.mark.asyncio
+async def test_stable_meet_caption_ignores_chatter_without_wake_word(tmp_path: Path) -> None:
+    runtime = _runtime_for_handoff_fixture(tmp_path)
+    await runtime.join_meeting("https://meet.google.com/abc-defg-hij")
+    page = runtime.meet.meet_page
+    assert isinstance(page, SimulatedPageDriver)
+    page.caption_turns = []
+    await runtime._ingest_caption_turn_once()
+    page.caption_turns = [CaptionTurn("Avery", "The quarterly review starts tomorrow.")]
+
+    first = await runtime._ingest_caption_turn_once()
+    key = ("avery", "the quarterly review starts tomorrow.")
+    runtime._caption_candidates[key] -= 1.0
+    second = await runtime._ingest_caption_turn_once()
+
+    assert first is False
+    assert second is False
+    assert runtime.transcript == []
+
+
+@pytest.mark.asyncio
 async def test_non_invitation_turn_leaves_hand_raised(tmp_path: Path) -> None:
     runtime = _runtime_for_handoff_fixture(tmp_path)
     await runtime.join_meeting("https://meet.google.com/abc-defg-hij")

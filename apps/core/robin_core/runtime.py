@@ -120,6 +120,9 @@ class RobinRuntime:
         self._realtime_partials: dict[str, str] = {}
         self._realtime_barge_in_items: set[str] = set()
         self._seen_caption_turns: set[tuple[str, str]] = set()
+        self._caption_candidates: dict[tuple[str, str], float] = {}
+        self._last_caption_text_by_speaker: dict[str, str] = {}
+        self._caption_baseline_ready = False
         self._active_spoken_text: str | None = None
         self._meet_recovery_event_count = 0
         self._meet_speech_route_event_count = 0
@@ -958,6 +961,9 @@ class RobinRuntime:
             )
         )
         self._seen_caption_turns.clear()
+        self._caption_candidates.clear()
+        self._last_caption_text_by_speaker.clear()
+        self._caption_baseline_ready = False
         self._ensure_caption_watch()
         if self.meeting_state == MeetingState.IDLE:
             self.meeting_state = MeetingState.LISTENING
@@ -999,7 +1005,7 @@ class RobinRuntime:
         failures = 0
         while True:
             try:
-                await self._ingest_caption_invitation_once()
+                await self._ingest_caption_turn_once()
                 failures = 0
                 await asyncio.sleep(0.25)
             except asyncio.CancelledError:
@@ -1026,7 +1032,6 @@ class RobinRuntime:
             key = (speaker.casefold(), text.casefold())
             if not text or key in self._seen_caption_turns:
                 continue
-            self._seen_caption_turns.add(key)
             intent = await self.intent.classify(
                 text,
                 self._active_tasks(),
@@ -1034,6 +1039,7 @@ class RobinRuntime:
             )
             if intent.classification != "presentation_invitation":
                 continue
+            self._seen_caption_turns.add(key)
             await self.emit_event(
                 "audio.caption.invitation_fallback",
                 {"speaker_name": speaker, "text": text},
@@ -1043,6 +1049,76 @@ class RobinRuntime:
             await self.ingest_transcript(
                 text,
                 speaker_name=speaker or "Meet participant",
+                source="meet_caption",
+            )
+            return True
+        return False
+
+    async def _ingest_caption_turn_once(self) -> bool:
+        """Continuously ingest stable Meet captions when native audio is unavailable."""
+
+        if await self._ingest_caption_invitation_once():
+            return True
+        captions = await asyncio.wait_for(self.meet.recent_captions(), timeout=1.0)
+        now = time.monotonic()
+        normalized_captions = [
+            (
+                " ".join(caption.speaker_name.split()) or "Meet participant",
+                " ".join(caption.text.split()),
+            )
+            for caption in captions
+            if caption.text.strip()
+        ]
+        current_keys = {
+            (speaker.casefold(), text.casefold()) for speaker, text in normalized_captions
+        }
+        if not self._caption_baseline_ready:
+            self._seen_caption_turns.update(current_keys)
+            self._caption_baseline_ready = True
+            return False
+        self._caption_candidates = {
+            key: observed_at
+            for key, observed_at in self._caption_candidates.items()
+            if key in current_keys
+        }
+        for speaker, text in normalized_captions:
+            speaker_key = speaker.casefold()
+            key = (speaker_key, text.casefold())
+            if not text or key in self._seen_caption_turns:
+                continue
+            observed_at = self._caption_candidates.get(key)
+            if observed_at is None:
+                self._caption_candidates[key] = now
+                continue
+            if now - observed_at < 0.8:
+                continue
+
+            self._caption_candidates.pop(key, None)
+            self._seen_caption_turns.add(key)
+            previous = self._last_caption_text_by_speaker.get(speaker_key, "")
+            ingest_text = text
+            if previous and text.casefold().startswith(previous.casefold() + " "):
+                ingest_text = text[len(previous) :].strip()
+            self._last_caption_text_by_speaker[speaker_key] = text
+            if not ingest_text:
+                continue
+            if not self._contains_wake_word(ingest_text):
+                return False
+            if self._is_recent_robin_echo(ingest_text):
+                await self.emit_event(
+                    "audio.caption.echo_suppressed",
+                    {"speaker_name": speaker, "text": ingest_text},
+                    component="audio",
+                )
+                return False
+            await self.emit_event(
+                "audio.caption.transcript_fallback",
+                {"speaker_name": speaker, "text": ingest_text},
+                component="audio",
+            )
+            await self.ingest_transcript(
+                ingest_text,
+                speaker_name=speaker,
                 source="meet_caption",
             )
             return True

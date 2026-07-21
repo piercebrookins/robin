@@ -36,12 +36,14 @@ else
   uv run python scripts/demo_reset.py --stop-only
 fi
 
+ROBIN_DASHBOARD_CORE_URL="http://127.0.0.1:8787"
 if [[ ! -f apps/web/.next/BUILD_ID ]] || \
    [[ apps/web/next.config.ts -nt apps/web/.next/BUILD_ID ]] || \
    [[ apps/web/package.json -nt apps/web/.next/BUILD_ID ]] || \
+   ! rg -q --fixed-strings "$ROBIN_DASHBOARD_CORE_URL" apps/web/.next/static/chunks 2>/dev/null || \
    [[ -n "$(find apps/web/app apps/web/lib -type f -newer apps/web/.next/BUILD_ID -print -quit 2>/dev/null)" ]]; then
   echo "Building the lightweight dashboard runtime…"
-  pnpm --dir apps/web build
+  NEXT_PUBLIC_ROBIN_CORE_URL="$ROBIN_DASHBOARD_CORE_URL" pnpm --dir apps/web build
 fi
 
 echo "Preparing Robin's Chrome session…"
