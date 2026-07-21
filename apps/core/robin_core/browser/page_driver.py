@@ -287,7 +287,10 @@ class SimulatedPageDriver:
             "enable_captions_button": "Turn on captions|Show captions|Enable captions",
             "disable_captions_button": "Turn off captions|Hide captions|Disable captions",
         }.items():
-            if any(candidate.name_regex == known or candidate.text_regex == known for candidate in candidates):
+            if any(
+                candidate.name_regex == known or candidate.text_regex == known
+                for candidate in candidates
+            ):
                 return key
         return "unknown"
 
@@ -692,6 +695,7 @@ class PlaywrightPageDriver:
                 '[aria-live="polite"]',
                 '[aria-live="assertive"]',
                 '.iTTPOb',
+                '.nMcdL',
                 '[jsname="tgaKEf"]'
               ];
               const nodes = [...new Set(selectors.flatMap(selector => [...document.querySelectorAll(selector)]))];
@@ -722,6 +726,13 @@ class PlaywrightPageDriver:
                   if (parts.length >= 2 && parts[0].length <= 80) {
                     speaker ||= parts[0];
                     text ||= parts.slice(1).join(' ');
+                  }
+                }
+                if (!speaker || !text) {
+                  const lines = (node.innerText || '').split(/\n+/).map(clean).filter(Boolean);
+                  if (lines.length >= 2 && lines[0].length <= 80) {
+                    speaker ||= lines[0];
+                    text ||= lines.slice(1).join(' ');
                   }
                 }
                 if (speaker && text && !ignored.test(speaker) && speaker !== text && text.length <= 1000) {
