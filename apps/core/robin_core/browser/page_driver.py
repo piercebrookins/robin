@@ -696,6 +696,7 @@ class PlaywrightPageDriver:
                 '[aria-live="assertive"]',
                 '.iTTPOb',
                 '.nMcdL',
+                '.ygicle',
                 '[jsname="tgaKEf"]'
               ];
               const nodes = [...new Set(selectors.flatMap(selector => [...document.querySelectorAll(selector)]))];
@@ -709,10 +710,16 @@ class PlaywrightPageDriver:
               const results = [];
               for (const node of nodes) {
                 if (!visible(node)) continue;
-                const speakerNode = node.querySelector(
+                const nodeIsText = node.matches(
+                  '[data-caption-text], .CNusmb, .ygicle, [jsname="YSxPC"]'
+                );
+                const row = nodeIsText
+                  ? node.closest('[data-robin-caption], .iTTPOb, .nMcdL, [role="region"]') || node.parentElement || node
+                  : node;
+                const speakerNode = row.querySelector(
                   '[data-speaker-name], .zs7s8d, .KcIKyf, [aria-label^="Caption from "]'
                 );
-                const textNode = node.querySelector(
+                const textNode = nodeIsText ? node : row.querySelector(
                   '[data-caption-text], .CNusmb, .ygicle, [jsname="YSxPC"]'
                 );
                 let speaker = clean(
@@ -722,14 +729,14 @@ class PlaywrightPageDriver:
                 );
                 let text = clean(textNode?.textContent);
                 if (!speaker || !text) {
-                  const parts = [...node.children].map(child => clean(child.textContent)).filter(Boolean);
+                  const parts = [...row.children].map(child => clean(child.textContent)).filter(Boolean);
                   if (parts.length >= 2 && parts[0].length <= 80) {
                     speaker ||= parts[0];
                     text ||= parts.slice(1).join(' ');
                   }
                 }
                 if (!speaker || !text) {
-                  const lines = (node.innerText || '').split(/\n+/).map(clean).filter(Boolean);
+                  const lines = (row.innerText || '').split(/\n+/).map(clean).filter(Boolean);
                   if (lines.length >= 2 && lines[0].length <= 80) {
                     speaker ||= lines[0];
                     text ||= lines.slice(1).join(' ');
