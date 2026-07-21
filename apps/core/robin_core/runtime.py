@@ -1863,7 +1863,16 @@ class RobinRuntime:
         return await self.publish()
 
     def presentation_state(self, task_id: UUID) -> PresentationSession:
-        return self.presentations.get(task_id) or self.activate_presentation(task_id)
+        existing = self.presentations.get(task_id)
+        if existing:
+            return existing
+        state = PresentationSession(
+            task_id=task_id,
+            active=False,
+            slide_count=self._deck_slide_count(task_id),
+        )
+        self.presentations[task_id] = state
+        return state
 
     def activate_presentation(self, task_id: UUID) -> PresentationSession:
         slide_count = self._deck_slide_count(task_id)
@@ -1882,6 +1891,8 @@ class RobinRuntime:
         self, task_id: UUID, action: str, index: int | None = None
     ) -> PresentationSession:
         state = self.presentation_state(task_id)
+        if not state.active:
+            raise RuntimeError("Presentation is not active")
         if action == "next":
             state.active_slide += 1
         elif action == "previous":

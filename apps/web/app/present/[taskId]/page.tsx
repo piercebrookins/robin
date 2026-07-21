@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-import { activatePresentation, getDeck, getPresentationSession, navigatePresentation } from "../../../lib/api";
+import { getDeck, getPresentationSession, navigatePresentation } from "../../../lib/api";
 import type { ChartSpec, DeckSpec } from "../../../lib/types";
 
 export default function Presentation({ params, searchParams }: { params: Promise<{ taskId: string }>; searchParams: Promise<{ revision?: string }> }) {
@@ -18,7 +18,7 @@ export default function Presentation({ params, searchParams }: { params: Promise
       const revision = query.revision ? Number.parseInt(query.revision, 10) : undefined;
       setTaskId(taskId);
       setRequestedRevision(Number.isFinite(revision) ? revision : undefined);
-      return Promise.all([getDeck(taskId, Number.isFinite(revision) ? revision : undefined), activatePresentation(taskId)]);
+      return Promise.all([getDeck(taskId, Number.isFinite(revision) ? revision : undefined), getPresentationSession(taskId)]);
     }).then(([{ deck, chart }, session]) => {
       setDeck(deck);
       setChart(chart);

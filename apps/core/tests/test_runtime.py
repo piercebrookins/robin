@@ -779,6 +779,19 @@ async def test_presentation_navigation_state_is_clamped(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_open_stale_presentation_tab_cannot_reactivate_or_advance(tmp_path: Path) -> None:
+    runtime = _runtime_for_handoff_fixture(tmp_path)
+    task = _ready_task_with_deck(runtime, "Ready deck")
+
+    state = runtime.presentation_state(task.id)
+
+    assert state.active is False
+    with pytest.raises(RuntimeError, match="not active"):
+        await runtime.navigate_presentation(task.id, "next")
+    assert state.active_slide == 0
+
+
+@pytest.mark.asyncio
 async def test_stop_presenting_deactivates_presentation_session(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     source = workspace / "source-data"
